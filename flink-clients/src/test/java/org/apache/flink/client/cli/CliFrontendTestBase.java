@@ -19,43 +19,19 @@
 package org.apache.flink.client.cli;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.GlobalConfiguration;
 import org.apache.flink.util.TestLogger;
 
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
-
-import java.util.Arrays;
-import java.util.List;
-
 /**
- * Base test class for {@link CliFrontend} tests that wraps the Flip-6 vs. non-Flip-6 modes.
+ * Base test class for {@link CliFrontend} tests.
  */
-@RunWith(Parameterized.class)
 public abstract class CliFrontendTestBase extends TestLogger {
-	@Parameterized.Parameter
-	public String mode;
-
-	@Parameterized.Parameters(name = "Mode = {0}")
-	public static List<String> parameters() {
-		return Arrays.asList(CoreOptions.OLD_MODE, CoreOptions.FLIP6_MODE);
-	}
 
 	protected Configuration getConfiguration() {
-		final Configuration configuration = GlobalConfiguration
-			.loadConfiguration(CliFrontendTestUtils.getConfigDir());
-		configuration.setString(CoreOptions.MODE, mode);
-		return configuration;
+		return GlobalConfiguration.loadConfiguration(CliFrontendTestUtils.getConfigDir());
 	}
 
-	static AbstractCustomCommandLine<?> getCli(Configuration configuration) {
-		switch (configuration.getString(CoreOptions.MODE)) {
-			case CoreOptions.OLD_MODE:
-				return new DefaultCLI(configuration);
-			case CoreOptions.FLIP6_MODE:
-				return new Flip6DefaultCLI(configuration);
-		}
-		throw new IllegalStateException();
+	static AbstractCustomCommandLine getCli(Configuration configuration) {
+		return new DefaultCLI(configuration);
 	}
 }

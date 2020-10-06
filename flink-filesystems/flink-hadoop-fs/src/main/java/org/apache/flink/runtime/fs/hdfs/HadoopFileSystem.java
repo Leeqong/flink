@@ -23,6 +23,7 @@ import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.FileSystemKind;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.core.fs.RecoverableWriter;
 
 import java.io.IOException;
 import java.net.URI;
@@ -82,7 +83,7 @@ public class HadoopFileSystem extends FileSystem {
 	@Override
 	public FileStatus getFileStatus(final Path f) throws IOException {
 		org.apache.hadoop.fs.FileStatus status = this.fs.getFileStatus(toHadoopPath(f));
-		return new HadoopFileStatus(status);
+		return HadoopFileStatus.fromHadoopStatus(status);
 	}
 
 	@Override
@@ -92,10 +93,18 @@ public class HadoopFileSystem extends FileSystem {
 			throw new IOException("file is not an instance of DistributedFileStatus");
 		}
 
-		final HadoopFileStatus f = (HadoopFileStatus) file;
+		// shortcut - if the status already has the information, return it.
+		if (file instanceof LocatedHadoopFileStatus) {
+			return ((LocatedHadoopFileStatus) file).getBlockLocations();
+		}
 
-		final org.apache.hadoop.fs.BlockLocation[] blkLocations = fs.getFileBlockLocations(f.getInternalFileStatus(),
-			start, len);
+		final org.apache.hadoop.fs.FileStatus hadoopStatus = ((HadoopFileStatus) file).getInternalFileStatus();
+
+		// second shortcut - if the internal status already has the information, return it.
+		// only if that is not the case, to the actual HDFS call (RPC to Name Node)
+		final org.apache.hadoop.fs.BlockLocation[] blkLocations = hadoopStatus instanceof org.apache.hadoop.fs.LocatedFileStatus
+				? ((org.apache.hadoop.fs.LocatedFileStatus) hadoopStatus).getBlockLocations()
+				: fs.getFileBlockLocations(hadoopStatus, start, len);
 
 		// Wrap up HDFS specific block location objects
 		final HadoopBlockLocation[] distBlkLocations = new HadoopBlockLocation[blkLocations.length];
@@ -158,7 +167,7 @@ public class HadoopFileSystem extends FileSystem {
 
 		// Convert types
 		for (int i = 0; i < files.length; i++) {
-			files[i] = new HadoopFileStatus(hadoopFiles[i]);
+			files[i] = HadoopFileStatus.fromHadoopStatus(hadoopFiles[i]);
 		}
 
 		return files;
@@ -193,11 +202,19 @@ public class HadoopFileSystem extends FileSystem {
 		return fsKind;
 	}
 
+	@Override
+	public RecoverableWriter createRecoverableWriter() throws IOException {
+		// This writer is only supported on a subset of file systems, and on
+		// specific versions. We check these schemes and versions eagerly for better error
+		// messages in the constructor of the writer.
+		return new HadoopRecoverableWriter(fs);
+	}
+
 	// ------------------------------------------------------------------------
 	//  Utilities
 	// ------------------------------------------------------------------------
 
-	private static org.apache.hadoop.fs.Path toHadoopPath(Path path) {
+	public static org.apache.hadoop.fs.Path toHadoopPath(Path path) {
 		return new org.apache.hadoop.fs.Path(path.toUri());
 	}
 
@@ -215,8 +232,8 @@ public class HadoopFileSystem extends FileSystem {
 	static FileSystemKind getKindForScheme(String scheme) {
 		scheme = scheme.toLowerCase(Locale.US);
 
-		if (scheme.startsWith("s3") || scheme.startsWith("emr")) {
-			// the Amazon S3 storage
+		if (scheme.startsWith("s3") || scheme.startsWith("emr") || scheme.startsWith("oss") || scheme.startsWith("wasb")) {
+			// the Amazon S3 storage or Aliyun OSS storage or Azure Blob Storage
 			return FileSystemKind.OBJECT_STORE;
 		}
 		else if (scheme.startsWith("http") || scheme.startsWith("ftp")) {

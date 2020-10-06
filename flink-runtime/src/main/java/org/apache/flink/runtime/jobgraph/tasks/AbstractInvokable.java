@@ -24,6 +24,13 @@ import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.operators.coordination.OperatorEvent;
+import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.SerializedValue;
+
+import java.io.IOException;
+import java.util.concurrent.Future;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -50,14 +57,17 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * the initial state structure by the Garbage Collector.
  *
  * <p>Any subclass that supports recoverable state and participates in
- * checkpointing needs to override {@link #triggerCheckpoint(CheckpointMetaData, CheckpointOptions)},
+ * checkpointing needs to override {@link #triggerCheckpointAsync(CheckpointMetaData, CheckpointOptions, boolean)},
  * {@link #triggerCheckpointOnBarrier(CheckpointMetaData, CheckpointOptions, CheckpointMetrics)},
- * {@link #abortCheckpointOnBarrier(long, Throwable)} and {@link #notifyCheckpointComplete(long)}.
+ * {@link #abortCheckpointOnBarrier(long, Throwable)} and {@link #notifyCheckpointCompleteAsync(long)}.
  */
 public abstract class AbstractInvokable {
 
 	/** The environment assigned to this invokable. */
 	private final Environment environment;
+
+	/** Flag whether cancellation should interrupt the executing thread. */
+	private volatile boolean shouldInterruptOnCancel = true;
 
 	/**
 	 * Create an Invokable task and set its environment.
@@ -67,6 +77,10 @@ public abstract class AbstractInvokable {
 	public AbstractInvokable(Environment environment) {
 		this.environment = checkNotNull(environment);
 	}
+
+	// ------------------------------------------------------------------------
+	//  Core methods
+	// ------------------------------------------------------------------------
 
 	/**
 	 * Starts the execution.
@@ -95,11 +109,37 @@ public abstract class AbstractInvokable {
 	}
 
 	/**
+	 * Sets whether the thread that executes the {@link #invoke()} method should be
+	 * interrupted during cancellation. This method sets the flag for both the initial
+	 * interrupt, as well as for the repeated interrupt. Setting the interruption to
+	 * false at some point during the cancellation procedure is a way to stop further
+	 * interrupts from happening.
+	 */
+	public void setShouldInterruptOnCancel(boolean shouldInterruptOnCancel) {
+		this.shouldInterruptOnCancel = shouldInterruptOnCancel;
+	}
+
+	/**
+	 * Checks whether the task should be interrupted during cancellation.
+	 * This method is check both for the initial interrupt, as well as for the
+	 * repeated interrupt. Setting the interruption to false via
+	 * {@link #setShouldInterruptOnCancel(boolean)} is a way to stop further interrupts
+	 * from happening.
+	 */
+	public boolean shouldInterruptOnCancel() {
+		return shouldInterruptOnCancel;
+	}
+
+	// ------------------------------------------------------------------------
+	//  Access to Environment and Configuration
+	// ------------------------------------------------------------------------
+
+	/**
 	 * Returns the environment of this task.
-	 * 
+	 *
 	 * @return The environment of this task.
 	 */
-	public Environment getEnvironment() {
+	public final Environment getEnvironment() {
 		return this.environment;
 	}
 
@@ -108,13 +148,13 @@ public abstract class AbstractInvokable {
 	 *
 	 * @return user code class loader of this invokable.
 	 */
-	public ClassLoader getUserCodeClassLoader() {
-		return getEnvironment().getUserClassLoader();
+	public final ClassLoader getUserCodeClassLoader() {
+		return getEnvironment().getUserCodeClassLoader().asClassLoader();
 	}
 
 	/**
 	 * Returns the current number of subtasks the respective task is split into.
-	 * 
+	 *
 	 * @return the current number of subtasks the respective task is split into
 	 */
 	public int getCurrentNumberOfSubtasks() {
@@ -123,7 +163,7 @@ public abstract class AbstractInvokable {
 
 	/**
 	 * Returns the index of this subtask in the subtask group.
-	 * 
+	 *
 	 * @return the index of this subtask in the subtask group
 	 */
 	public int getIndexInSubtaskGroup() {
@@ -132,16 +172,16 @@ public abstract class AbstractInvokable {
 
 	/**
 	 * Returns the task configuration object which was attached to the original {@link org.apache.flink.runtime.jobgraph.JobVertex}.
-	 * 
+	 *
 	 * @return the task configuration object which was attached to the original {@link org.apache.flink.runtime.jobgraph.JobVertex}
 	 */
-	public Configuration getTaskConfiguration() {
+	public final Configuration getTaskConfiguration() {
 		return this.environment.getTaskConfiguration();
 	}
 
 	/**
 	 * Returns the job configuration object which was attached to the original {@link org.apache.flink.runtime.jobgraph.JobGraph}.
-	 * 
+	 *
 	 * @return the job configuration object which was attached to the original {@link org.apache.flink.runtime.jobgraph.JobGraph}
 	 */
 	public Configuration getJobConfiguration() {
@@ -170,11 +210,16 @@ public abstract class AbstractInvokable {
 	 *
 	 * @param checkpointMetaData Meta data for about this checkpoint
 	 * @param checkpointOptions Options for performing this checkpoint
+	 * @param advanceToEndOfEventTime Flag indicating if the source should inject a {@code MAX_WATERMARK} in the pipeline
+	 *                          to fire any registered event-time timers
 	 *
-	 * @return {@code false} if the checkpoint can not be carried out, {@code true} otherwise
+	 * @return future with value of {@code false} if the checkpoint was not carried out, {@code true} otherwise
 	 */
-	public boolean triggerCheckpoint(CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions) throws Exception {
-		throw new UnsupportedOperationException(String.format("triggerCheckpoint not supported by %s", this.getClass().getName()));
+	public Future<Boolean> triggerCheckpointAsync(
+			CheckpointMetaData checkpointMetaData,
+			CheckpointOptions checkpointOptions,
+			boolean advanceToEndOfEventTime) {
+		throw new UnsupportedOperationException(String.format("triggerCheckpointAsync not supported by %s", this.getClass().getName()));
 	}
 
 	/**
@@ -187,7 +232,7 @@ public abstract class AbstractInvokable {
 	 *
 	 * @throws Exception Exceptions thrown as the result of triggering a checkpoint are forwarded.
 	 */
-	public void triggerCheckpointOnBarrier(CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions, CheckpointMetrics checkpointMetrics) throws Exception {
+	public void triggerCheckpointOnBarrier(CheckpointMetaData checkpointMetaData, CheckpointOptions checkpointOptions, CheckpointMetrics checkpointMetrics) throws IOException {
 		throw new UnsupportedOperationException(String.format("triggerCheckpointOnBarrier not supported by %s", this.getClass().getName()));
 	}
 
@@ -201,7 +246,7 @@ public abstract class AbstractInvokable {
 	 * @param checkpointId The ID of the checkpoint to be aborted.
 	 * @param cause The reason why the checkpoint was aborted during alignment
 	 */
-	public void abortCheckpointOnBarrier(long checkpointId, Throwable cause) throws Exception {
+	public void abortCheckpointOnBarrier(long checkpointId, Throwable cause) throws IOException {
 		throw new UnsupportedOperationException(String.format("abortCheckpointOnBarrier not supported by %s", this.getClass().getName()));
 	}
 
@@ -209,10 +254,27 @@ public abstract class AbstractInvokable {
 	 * Invoked when a checkpoint has been completed, i.e., when the checkpoint coordinator has received
 	 * the notification from all participating tasks.
 	 *
-	 * @param checkpointId The ID of the checkpoint that is complete..
-	 * @throws Exception The notification method may forward its exceptions.
+	 * @param checkpointId The ID of the checkpoint that is complete.
+	 *
+	 * @return future that completes when the notification has been processed by the task.
 	 */
-	public void notifyCheckpointComplete(long checkpointId) throws Exception {
-		throw new UnsupportedOperationException(String.format("notifyCheckpointComplete not supported by %s", this.getClass().getName()));
+	public Future<Void> notifyCheckpointCompleteAsync(long checkpointId) {
+		throw new UnsupportedOperationException(String.format("notifyCheckpointCompleteAsync not supported by %s", this.getClass().getName()));
+	}
+
+	/**
+	 * Invoked when a checkpoint has been aborted, i.e., when the checkpoint coordinator has received a decline message
+	 * from one task and try to abort the targeted checkpoint by notification.
+	 *
+	 * @param checkpointId The ID of the checkpoint that is aborted.
+	 *
+	 * @return future that completes when the notification has been processed by the task.
+	 */
+	public Future<Void> notifyCheckpointAbortAsync(long checkpointId) {
+		throw new UnsupportedOperationException(String.format("notifyCheckpointAbortAsync not supported by %s", this.getClass().getName()));
+	}
+
+	public void dispatchOperatorEvent(OperatorID operator, SerializedValue<OperatorEvent> event) throws FlinkException {
+		throw new UnsupportedOperationException("dispatchOperatorEvent not supported by " + getClass().getName());
 	}
 }

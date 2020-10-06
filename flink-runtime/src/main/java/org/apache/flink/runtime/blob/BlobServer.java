@@ -23,6 +23,7 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.runtime.net.SSLUtils;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FileUtils;
@@ -33,13 +34,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
-import javax.net.ssl.SSLContext;
+import javax.net.ServerSocketFactory;
 
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.security.MessageDigest;
@@ -77,9 +79,6 @@ public class BlobServer extends Thread implements BlobService, BlobWriter, Perma
 
 	/** The server socket listening for incoming connections. */
 	private final ServerSocket serverSocket;
-
-	/** The SSL server context if ssl is enabled for the connections. */
-	private final SSLContext serverSSLContext;
 
 	/** Blob Server configuration. */
 	private final Configuration blobServiceConfiguration;
@@ -172,40 +171,32 @@ public class BlobServer extends Thread implements BlobService, BlobWriter, Perma
 
 		this.shutdownHook = ShutdownHookUtil.addShutdownHook(this, getClass().getSimpleName(), LOG);
 
-		if (config.getBoolean(BlobServerOptions.SSL_ENABLED)) {
-			try {
-				serverSSLContext = SSLUtils.createSSLServerContext(config);
-			} catch (Exception e) {
-				throw new IOException("Failed to initialize SSLContext for the blob server", e);
-			}
-		} else {
-			serverSSLContext = null;
-		}
-
 		//  ----------------------- start the server -------------------
 
-		String serverPortRange = config.getString(BlobServerOptions.PORT);
+		final String serverPortRange = config.getString(BlobServerOptions.PORT);
+		final Iterator<Integer> ports = NetUtils.getPortRangeFromString(serverPortRange);
 
-		Iterator<Integer> ports = NetUtils.getPortRangeFromString(serverPortRange);
+		final ServerSocketFactory socketFactory;
+		if (SSLUtils.isInternalSSLEnabled(config) && config.getBoolean(BlobServerOptions.SSL_ENABLED)) {
+			try {
+				socketFactory = SSLUtils.createSSLServerSocketFactory(config);
+			}
+			catch (Exception e) {
+				throw new IOException("Failed to initialize SSL for the blob server", e);
+			}
+		}
+		else {
+			socketFactory = ServerSocketFactory.getDefault();
+		}
 
 		final int finalBacklog = backlog;
-		ServerSocket socketAttempt = NetUtils.createSocketFromPorts(ports, new NetUtils.SocketFactory() {
-			@Override
-			public ServerSocket createSocket(int port) throws IOException {
-				if (serverSSLContext == null) {
-					return new ServerSocket(port, finalBacklog);
-				} else {
-					LOG.info("Enabling ssl for the blob server");
-					return serverSSLContext.getServerSocketFactory().createServerSocket(port, finalBacklog);
-				}
-			}
-		});
+		final String bindHost = config.getOptional(JobManagerOptions.BIND_HOST).orElseGet(NetUtils::getWildcardIPAddress);
 
-		if (socketAttempt == null) {
-			throw new IOException("Unable to allocate socket for blob server in specified port range: " + serverPortRange);
-		} else {
-			SSLUtils.setSSLVerAndCipherSuites(socketAttempt, config);
-			this.serverSocket = socketAttempt;
+		this.serverSocket = NetUtils.createSocketFromPorts(ports,
+				(port) -> socketFactory.createServerSocket(port, finalBacklog, InetAddress.getByName(bindHost)));
+
+		if (serverSocket == null) {
+			throw new IOException("Unable to open BLOB Server in specified port range: " + serverPortRange);
 		}
 
 		// start the server thread
@@ -221,6 +212,10 @@ public class BlobServer extends Thread implements BlobService, BlobWriter, Perma
 	// --------------------------------------------------------------------------------------------
 	//  Path Accessors
 	// --------------------------------------------------------------------------------------------
+
+	public File getStorageDir() {
+		return storageDir;
+	}
 
 	/**
 	 * Returns a file handle to the file associated with the given blob key on the blob
@@ -642,20 +637,9 @@ public class BlobServer extends Thread implements BlobService, BlobWriter, Perma
 		}
 
 		File incomingFile = createTemporaryFilename();
-		MessageDigest md = BlobUtils.createMessageDigest();
 		BlobKey blobKey = null;
-		try (FileOutputStream fos = new FileOutputStream(incomingFile)) {
-			// read stream
-			byte[] buf = new byte[BUFFER_SIZE];
-			while (true) {
-				final int bytesRead = inputStream.read(buf);
-				if (bytesRead == -1) {
-					// done
-					break;
-				}
-				fos.write(buf, 0, bytesRead);
-				md.update(buf, 0, bytesRead);
-			}
+		try {
+			MessageDigest md = writeStreamToFileAndCreateDigest(inputStream, incomingFile);
 
 			// persist file
 			blobKey = moveTempFileToStore(incomingFile, jobId, md.digest(), blobType);
@@ -667,6 +651,24 @@ public class BlobServer extends Thread implements BlobService, BlobWriter, Perma
 				LOG.warn("Could not delete the staging file {} for blob key {} and job {}.",
 					incomingFile, blobKey, jobId);
 			}
+		}
+	}
+
+	private static MessageDigest writeStreamToFileAndCreateDigest(InputStream inputStream, File file) throws IOException {
+		try (FileOutputStream fos = new FileOutputStream(file)) {
+			MessageDigest md = BlobUtils.createMessageDigest();
+			// read stream
+			byte[] buf = new byte[BUFFER_SIZE];
+			while (true) {
+				final int bytesRead = inputStream.read(buf);
+				if (bytesRead == -1) {
+					// done
+					break;
+				}
+				fos.write(buf, 0, bytesRead);
+				md.update(buf, 0, bytesRead);
+			}
+			return md;
 		}
 	}
 
@@ -801,11 +803,13 @@ public class BlobServer extends Thread implements BlobService, BlobWriter, Perma
 	 *
 	 * @param jobId
 	 * 		ID of the job this blob belongs to
+	 * @param cleanupBlobStoreFiles
+	 * 		True if the corresponding blob store files shall be cleaned up as well. Otherwise false.
 	 *
 	 * @return  <tt>true</tt> if the job directory is successfully deleted or non-existing;
 	 *          <tt>false</tt> otherwise
 	 */
-	public boolean cleanupJob(JobID jobId) {
+	public boolean cleanupJob(JobID jobId, boolean cleanupBlobStoreFiles) {
 		checkNotNull(jobId);
 
 		final File jobDir =
@@ -830,8 +834,8 @@ public class BlobServer extends Thread implements BlobService, BlobWriter, Perma
 					jobDir.getAbsolutePath(), e);
 			}
 
-			// delete in HA store
-			boolean deletedHA = blobStore.deleteAll(jobId);
+			// delete in HA blob store files
+			final boolean deletedHA = !cleanupBlobStoreFiles || blobStore.deleteAll(jobId);
 
 			return deletedLocally && deletedHA;
 		} finally {

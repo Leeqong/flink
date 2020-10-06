@@ -43,6 +43,7 @@ import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -51,9 +52,8 @@ import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
-import org.apache.flink.test.util.MiniClusterResource;
+import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.AfterClass;
@@ -78,7 +78,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.apache.flink.test.util.TestUtils.submitJobAndWaitForResult;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Test savepoint rescaling.
@@ -90,7 +92,7 @@ public class RescalingITCase extends TestLogger {
 	private static final int slotsPerTaskManager = 2;
 	private static final int numSlots = numTaskManagers * slotsPerTaskManager;
 
-	@Parameterized.Parameters
+	@Parameterized.Parameters(name = "backend = {0}")
 	public static Object[] data() {
 		return new Object[]{"filesystem", "rocksdb"};
 	}
@@ -104,7 +106,7 @@ public class RescalingITCase extends TestLogger {
 		NON_PARTITIONED, CHECKPOINTED_FUNCTION, CHECKPOINTED_FUNCTION_BROADCAST, LIST_CHECKPOINTED
 	}
 
-	private static MiniClusterResource cluster;
+	private static MiniClusterWithClientResource cluster;
 
 	@ClassRule
 	public static TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -126,12 +128,12 @@ public class RescalingITCase extends TestLogger {
 			config.setString(CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointDir.toURI().toString());
 			config.setString(CheckpointingOptions.SAVEPOINT_DIRECTORY, savepointDir.toURI().toString());
 
-			cluster = new MiniClusterResource(
-				new MiniClusterResource.MiniClusterResourceConfiguration(
-					config,
-					numTaskManagers,
-					slotsPerTaskManager),
-				true);
+			cluster = new MiniClusterWithClientResource(
+				new MiniClusterResourceConfiguration.Builder()
+					.setConfiguration(config)
+					.setNumberTaskManagers(numTaskManagers)
+					.setNumberSlotsPerTaskManager(numSlots)
+					.build());
 			cluster.before();
 		}
 	}
@@ -186,11 +188,10 @@ public class RescalingITCase extends TestLogger {
 
 			final JobID jobID = jobGraph.getJobID();
 
-			client.setDetached(true);
-			client.submitJob(jobGraph, RescalingITCase.class.getClassLoader());
+			client.submitJob(jobGraph).get();
 
 			// wait til the sources have emitted numberElements for each key and completed a checkpoint
-			SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
+			assertTrue(SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS));
 
 			// verify the current state
 
@@ -213,7 +214,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);
@@ -225,8 +226,7 @@ public class RescalingITCase extends TestLogger {
 
 			scaledJobGraph.setSavepointRestoreSettings(SavepointRestoreSettings.forPath(savepointPath));
 
-			client.setDetached(false);
-			client.submitJob(scaledJobGraph, RescalingITCase.class.getClassLoader());
+			submitJobAndWaitForResult(client, scaledJobGraph, getClass().getClassLoader());
 
 			Set<Tuple2<Integer, Integer>> actualResult2 = CollectionSink.getElementsSet();
 
@@ -267,8 +267,7 @@ public class RescalingITCase extends TestLogger {
 
 			final JobID jobID = jobGraph.getJobID();
 
-			client.setDetached(true);
-			client.submitJob(jobGraph, RescalingITCase.class.getClassLoader());
+			client.submitJob(jobGraph).get();
 
 			// wait until the operator is started
 			StateSourceBase.workStartedLatch.await();
@@ -277,7 +276,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);
@@ -288,8 +287,7 @@ public class RescalingITCase extends TestLogger {
 
 			scaledJobGraph.setSavepointRestoreSettings(SavepointRestoreSettings.forPath(savepointPath));
 
-			client.setDetached(false);
-			client.submitJob(scaledJobGraph, RescalingITCase.class.getClassLoader());
+			submitJobAndWaitForResult(client, scaledJobGraph, getClass().getClassLoader());
 		} catch (JobExecutionException exception) {
 			if (exception.getCause() instanceof IllegalStateException) {
 				// we expect a IllegalStateException wrapped
@@ -334,11 +332,10 @@ public class RescalingITCase extends TestLogger {
 
 			final JobID jobID = jobGraph.getJobID();
 
-			client.setDetached(true);
-			client.submitJob(jobGraph, RescalingITCase.class.getClassLoader());
+			client.submitJob(jobGraph).get();
 
 			// wait til the sources have emitted numberElements for each key and completed a checkpoint
-			SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
+			assertTrue(SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS));
 
 			// verify the current state
 
@@ -361,7 +358,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);
@@ -378,8 +375,7 @@ public class RescalingITCase extends TestLogger {
 
 			scaledJobGraph.setSavepointRestoreSettings(SavepointRestoreSettings.forPath(savepointPath));
 
-			client.setDetached(false);
-			client.submitJob(scaledJobGraph, RescalingITCase.class.getClassLoader());
+			submitJobAndWaitForResult(client, scaledJobGraph, getClass().getClassLoader());
 
 			Set<Tuple2<Integer, Integer>> actualResult2 = CollectionSink.getElementsSet();
 
@@ -458,20 +454,13 @@ public class RescalingITCase extends TestLogger {
 
 			final JobID jobID = jobGraph.getJobID();
 
-			client.setDetached(true);
-			client.submitJob(jobGraph, RescalingITCase.class.getClassLoader());
+			client.submitJob(jobGraph).get();
 
 			// wait until the operator is started
 			StateSourceBase.workStartedLatch.await();
 
 			CompletableFuture<String> savepointPathFuture = FutureUtils.retryWithDelay(
-				() -> {
-					try {
-						return client.triggerSavepoint(jobID, null);
-					} catch (FlinkException e) {
-						return FutureUtils.completedExceptionally(e);
-					}
-				},
+				() -> client.triggerSavepoint(jobID, null),
 				(int) deadline.timeLeft().getSeconds() / 10,
 				Time.seconds(10),
 				(throwable) -> true,
@@ -480,7 +469,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);
@@ -490,8 +479,7 @@ public class RescalingITCase extends TestLogger {
 
 			scaledJobGraph.setSavepointRestoreSettings(SavepointRestoreSettings.forPath(savepointPath));
 
-			client.setDetached(false);
-			client.submitJob(scaledJobGraph, RescalingITCase.class.getClassLoader());
+			submitJobAndWaitForResult(client, scaledJobGraph, getClass().getClassLoader());
 
 			int sumExp = 0;
 			int sumAct = 0;

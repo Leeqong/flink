@@ -22,7 +22,9 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.formats.avro.generated.Colors;
+import org.apache.flink.formats.avro.generated.Fixed2;
 import org.apache.flink.formats.avro.generated.User;
+import org.apache.flink.mock.Whitebox;
 
 import org.apache.avro.Schema;
 import org.apache.avro.file.DataFileReader;
@@ -30,7 +32,6 @@ import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
 import org.junit.Test;
-import org.mockito.internal.util.reflection.Whitebox;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -38,6 +39,12 @@ import java.io.File;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
@@ -50,7 +57,7 @@ import static org.junit.Assert.fail;
 public class AvroOutputFormatTest {
 
 	@Test
-	public void testSetCodec() throws Exception {
+	public void testSetCodec() {
 		// given
 		final AvroOutputFormat<User> outputFormat = new AvroOutputFormat<>(User.class);
 
@@ -64,7 +71,7 @@ public class AvroOutputFormatTest {
 	}
 
 	@Test
-	public void testSetCodecError() throws Exception {
+	public void testSetCodecError() {
 		// given
 		boolean error = false;
 		final AvroOutputFormat<User> outputFormat = new AvroOutputFormat<>(User.class);
@@ -111,6 +118,7 @@ public class AvroOutputFormatTest {
 			// then
 			Object o = ois.readObject();
 			assertTrue(o instanceof AvroOutputFormat);
+			@SuppressWarnings("unchecked")
 			final AvroOutputFormat<User> restored = (AvroOutputFormat<User>) o;
 			final AvroOutputFormat.Codec restoredCodec = (AvroOutputFormat.Codec) Whitebox.getInternalState(restored, "codec");
 			final Schema restoredSchema = (Schema) Whitebox.getInternalState(restored, "userDefinedSchema");
@@ -162,6 +170,18 @@ public class AvroOutputFormatTest {
 			user.setTypeArrayBoolean(Collections.emptyList());
 			user.setTypeEnum(Colors.BLUE);
 			user.setTypeMap(Collections.emptyMap());
+			user.setTypeBytes(ByteBuffer.allocate(10));
+			user.setTypeDate(LocalDate.parse("2014-03-01"));
+			user.setTypeTimeMillis(LocalTime.parse("12:12:12"));
+			user.setTypeTimeMicros(LocalTime.ofSecondOfDay(0).plus(123456L, ChronoUnit.MICROS));
+			user.setTypeTimestampMillis(Instant.parse("2014-03-01T12:12:12.321Z"));
+			user.setTypeTimestampMicros(Instant.ofEpochSecond(0).plus(123456L, ChronoUnit.MICROS));
+
+			// 20.00
+			user.setTypeDecimalBytes(ByteBuffer.wrap(BigDecimal.valueOf(2000, 2).unscaledValue().toByteArray()));
+			// 20.00
+			user.setTypeDecimalFixed(new Fixed2(BigDecimal.valueOf(2000, 2).unscaledValue().toByteArray()));
+
 			outputFormat.writeRecord(user);
 		}
 		outputFormat.close();
@@ -189,7 +209,6 @@ public class AvroOutputFormatTest {
 		//cleanup
 		FileSystem fs = FileSystem.getLocalFileSystem();
 		fs.delete(outputPath, false);
-
 	}
 
 	private void output(final AvroOutputFormat<GenericRecord> outputFormat, Schema schema) throws IOException {

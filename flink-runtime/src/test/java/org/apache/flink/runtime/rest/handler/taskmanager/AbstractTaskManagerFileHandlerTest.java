@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.rest.handler.taskmanager;
 
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.blob.BlobServer;
@@ -34,6 +35,7 @@ import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.HandlerRequestException;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.UntypedResponseMessageHeaders;
+import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerFileMessageParameters;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerIdPathParameter;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerMessageParameters;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
@@ -54,6 +56,7 @@ import org.apache.flink.shaded.netty4.io.netty.channel.ChannelProgressivePromise
 import org.apache.flink.shaded.netty4.io.netty.channel.ChannelPromise;
 import org.apache.flink.shaded.netty4.io.netty.channel.DefaultChannelPromise;
 import org.apache.flink.shaded.netty4.io.netty.channel.DefaultFileRegion;
+import org.apache.flink.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.DefaultFullHttpRequest;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpMethod;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpVersion;
@@ -122,7 +125,7 @@ public class AbstractTaskManagerFileHandlerTest extends TestLogger {
 
 		handlerRequest = new HandlerRequest<>(
 			EmptyRequestBody.getInstance(),
-			new TaskManagerMessageParameters(),
+			new TaskManagerFileMessageParameters(),
 			Collections.singletonMap(TaskManagerIdPathParameter.KEY, EXPECTED_TASK_MANAGER_ID.getResourceIdString()),
 			Collections.emptyMap());
 	}
@@ -237,7 +240,6 @@ public class AbstractTaskManagerFileHandlerTest extends TestLogger {
 		final ResourceManagerGateway resourceManagerGateway = new TestingResourceManagerGateway();
 
 		return new TestTaskManagerFileHandler(
-			CompletableFuture.completedFuture("localhost"),
 			() -> CompletableFuture.completedFuture(null),
 			TestingUtils.infiniteTime(),
 			Collections.emptyMap(),
@@ -276,15 +278,15 @@ public class AbstractTaskManagerFileHandlerTest extends TestLogger {
 
 		private final ResourceID expectedTaskManagerId;
 
-		protected TestTaskManagerFileHandler(@Nonnull CompletableFuture<String> localAddressFuture, @Nonnull GatewayRetriever<? extends RestfulGateway> leaderRetriever, @Nonnull Time timeout, @Nonnull Map<String, String> responseHeaders, @Nonnull UntypedResponseMessageHeaders<EmptyRequestBody, TaskManagerMessageParameters> untypedResponseMessageHeaders, @Nonnull GatewayRetriever<ResourceManagerGateway> resourceManagerGatewayRetriever, @Nonnull TransientBlobService transientBlobService, @Nonnull Time cacheEntryDuration, Queue<CompletableFuture<TransientBlobKey>> requestFileUploads, ResourceID expectedTaskManagerId) {
-			super(localAddressFuture, leaderRetriever, timeout, responseHeaders, untypedResponseMessageHeaders, resourceManagerGatewayRetriever, transientBlobService, cacheEntryDuration);
+		protected TestTaskManagerFileHandler(@Nonnull GatewayRetriever<? extends RestfulGateway> leaderRetriever, @Nonnull Time timeout, @Nonnull Map<String, String> responseHeaders, @Nonnull UntypedResponseMessageHeaders<EmptyRequestBody, TaskManagerMessageParameters> untypedResponseMessageHeaders, @Nonnull GatewayRetriever<ResourceManagerGateway> resourceManagerGatewayRetriever, @Nonnull TransientBlobService transientBlobService, @Nonnull Time cacheEntryDuration, Queue<CompletableFuture<TransientBlobKey>> requestFileUploads, ResourceID expectedTaskManagerId) {
+			super(leaderRetriever, timeout, responseHeaders, untypedResponseMessageHeaders, resourceManagerGatewayRetriever, transientBlobService, cacheEntryDuration);
 			this.requestFileUploads = Preconditions.checkNotNull(requestFileUploads);
 			this.expectedTaskManagerId = Preconditions.checkNotNull(expectedTaskManagerId);
 		}
 
 		@Override
-		protected CompletableFuture<TransientBlobKey> requestFileUpload(ResourceManagerGateway resourceManagerGateway, ResourceID taskManagerResourceId) {
-			assertThat(taskManagerResourceId, is(equalTo(expectedTaskManagerId)));
+		protected CompletableFuture<TransientBlobKey> requestFileUpload(ResourceManagerGateway resourceManagerGateway, Tuple2<ResourceID, String> taskManagerIdAndFileName) {
+			assertThat(taskManagerIdAndFileName.f0, is(equalTo(expectedTaskManagerId)));
 			final CompletableFuture<TransientBlobKey> transientBlobKeyFuture = requestFileUploads.poll();
 
 			if (transientBlobKeyFuture != null) {
@@ -320,7 +322,7 @@ public class AbstractTaskManagerFileHandlerTest extends TestLogger {
 				}
 			}
 
-			return new DefaultChannelPromise(null);
+			return new DefaultChannelPromise(new EmbeddedChannel());
 		}
 
 		@Override
@@ -522,6 +524,11 @@ public class AbstractTaskManagerFileHandlerTest extends TestLogger {
 		@Override
 		public <T> Attribute<T> attr(AttributeKey<T> key) {
 			return null;
+		}
+
+		@Override
+		public <T> boolean hasAttr(AttributeKey<T> attributeKey) {
+			return false;
 		}
 	}
 

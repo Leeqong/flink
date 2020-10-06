@@ -43,7 +43,7 @@ public class RescalingStatusHeaders extends
 	private RescalingStatusHeaders() {}
 
 	@Override
-	protected Class<AsynchronousOperationInfo> getValueClass() {
+	public Class<AsynchronousOperationInfo> getValueClass() {
 		return AsynchronousOperationInfo.class;
 	}
 
@@ -74,5 +74,10 @@ public class RescalingStatusHeaders extends
 
 	public static RescalingStatusHeaders getInstance() {
 		return INSTANCE;
+	}
+
+	@Override
+	public String getDescription() {
+		return "Returns the status of a rescaling operation.";
 	}
 }

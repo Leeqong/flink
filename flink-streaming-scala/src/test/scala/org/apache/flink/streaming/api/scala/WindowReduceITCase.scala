@@ -22,7 +22,6 @@ import java.util.concurrent.TimeUnit
 
 import org.apache.flink.api.common.functions.ReduceFunction
 import org.apache.flink.api.java.tuple.Tuple
-import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
 import org.apache.flink.streaming.api.functions.sink.SinkFunction
 import org.apache.flink.streaming.api.functions.source.SourceFunction
@@ -48,7 +47,6 @@ class WindowReduceITCase extends AbstractTestBase {
     WindowReduceITCase.testResults = mutable.MutableList()
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
 
     val source1 = env.addSource(new SourceFunction[(String, Int)]() {
@@ -75,7 +73,7 @@ class WindowReduceITCase extends AbstractTestBase {
       .window(TumblingEventTimeWindows.of(Time.of(3, TimeUnit.MILLISECONDS)))
       .reduce( (a, b) => (a._1 + b._1, a._2 + b._2) )
       .addSink(new SinkFunction[(String, Int)]() {
-        def invoke(value: (String, Int)) {
+        override def invoke(value: (String, Int)) {
           WindowReduceITCase.testResults += value.toString
         }
       })
@@ -102,7 +100,6 @@ class WindowReduceITCase extends AbstractTestBase {
     }
     
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
 
     val source1 = env.addSource(new SourceFunction[(String, Int)]() {
@@ -131,7 +128,7 @@ class WindowReduceITCase extends AbstractTestBase {
         reduceFunc,
         new CheckingIdentityRichWindowFunction[(String, Int), Tuple, TimeWindow]())
       .addSink(new SinkFunction[(String, Int)]() {
-        def invoke(value: (String, Int)) {
+        override def invoke(value: (String, Int)) {
           WindowReduceITCase.testResults += value.toString
         }
       })
@@ -160,7 +157,6 @@ class WindowReduceITCase extends AbstractTestBase {
     }
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
 
     val source1 = env.addSource(new SourceFunction[(String, Int)]() {
@@ -189,7 +185,7 @@ class WindowReduceITCase extends AbstractTestBase {
         reduceFunc,
         new CheckingIdentityRichProcessWindowFunction[(String, Int), Tuple, TimeWindow]())
       .addSink(new SinkFunction[(String, Int)]() {
-        def invoke(value: (String, Int)) {
+        override def invoke(value: (String, Int)) {
           WindowReduceITCase.testResults += value.toString
         }
       })
@@ -211,7 +207,6 @@ class WindowReduceITCase extends AbstractTestBase {
     WindowReduceITCase.testResults = mutable.MutableList()
     
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
 
     val source1 = env.addSource(new SourceFunction[(String, Int)]() {
@@ -237,7 +232,7 @@ class WindowReduceITCase extends AbstractTestBase {
       .windowAll(TumblingEventTimeWindows.of(Time.of(3, TimeUnit.MILLISECONDS)))
       .reduce( (a, b) => (a._1 + b._1, a._2 + b._2) )
       .addSink(new SinkFunction[(String, Int)]() {
-      def invoke(value: (String, Int)) {
+      override def invoke(value: (String, Int)) {
         WindowReduceITCase.testResults += value.toString
       }
     })
@@ -263,7 +258,6 @@ class WindowReduceITCase extends AbstractTestBase {
     }
     
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
 
     val source1 = env.addSource(new SourceFunction[(String, Int)]() {
@@ -291,7 +285,7 @@ class WindowReduceITCase extends AbstractTestBase {
         reduceFunc,
         new CheckingIdentityRichAllWindowFunction[(String, Int), TimeWindow]())
       .addSink(new SinkFunction[(String, Int)]() {
-        def invoke(value: (String, Int)) {
+        override def invoke(value: (String, Int)) {
           WindowReduceITCase.testResults += value.toString
         }
       })
@@ -319,7 +313,6 @@ class WindowReduceITCase extends AbstractTestBase {
     }
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
 
     val source1 = env.addSource(new SourceFunction[(String, Int)]() {
@@ -347,7 +340,7 @@ class WindowReduceITCase extends AbstractTestBase {
         reduceFunc,
         new CheckingIdentityRichProcessAllWindowFunction[(String, Int), TimeWindow]())
       .addSink(new SinkFunction[(String, Int)]() {
-        def invoke(value: (String, Int)) {
+        override def invoke(value: (String, Int)) {
           WindowReduceITCase.testResults += value.toString
         }
       })

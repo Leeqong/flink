@@ -72,7 +72,12 @@ public class SavepointStatusHeaders
 	}
 
 	@Override
-	protected Class<SavepointInfo> getValueClass() {
+	public Class<SavepointInfo> getValueClass() {
 		return SavepointInfo.class;
+	}
+
+	@Override
+	public String getDescription() {
+		return "Returns the status of a savepoint operation.";
 	}
 }

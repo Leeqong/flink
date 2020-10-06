@@ -23,12 +23,12 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-filesystems</artifactId>
-		<version>1.6-SNAPSHOT</version>
+		<version>1.12-SNAPSHOT</version>
 		<relativePath>..</relativePath>
 	</parent>
 
 	<artifactId>flink-swift-fs-hadoop</artifactId>
-	<name>flink-swift-fs-hadoop</name>
+	<name>Flink : FileSystems : Swift FS Hadoop</name>
 
 	<packaging>jar</packaging>
 
@@ -37,6 +37,26 @@ under the License.
 		<openstackhadoop.hadoop.version>2.8.1</openstackhadoop.hadoop.version>
 	</properties>
 
+	<!-- Overwrite hadoop dependency versions inherited from the parent pom dependencyManagement -->
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.apache.hadoop</groupId>
+				<artifactId>hadoop-client</artifactId>
+				<version>${openstackhadoop.hadoop.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.hadoop</groupId>
+				<artifactId>hadoop-common</artifactId>
+				<version>${openstackhadoop.hadoop.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.hadoop</groupId>
+				<artifactId>hadoop-hdfs</artifactId>
+				<version>${openstackhadoop.hadoop.version}</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
 	<dependencies>
 
 		<!-- Flink core -->
@@ -59,8 +79,8 @@ under the License.
 				because the optional Hadoop dependency is also pulled in for tests -->
 			<exclusions>
 				<exclusion>
-					<groupId>org.apache.flink</groupId>
-					<artifactId>flink-shaded-hadoop2</artifactId>
+					<groupId>org.apache.hadoop</groupId>
+					<artifactId>hadoop-hdfs</artifactId>
 				</exclusion>
 			</exclusions>
 		</dependency>
@@ -116,6 +136,14 @@ under the License.
 					<groupId>org.apache.zookeeper</groupId>
 					<artifactId>zookeeper</artifactId>
 				</exclusion>
+				<exclusion>
+					<groupId>log4j</groupId>
+					<artifactId>log4j</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.slf4j</groupId>
+					<artifactId>slf4j-log4j12</artifactId>
+				</exclusion>
 			</exclusions>
 		</dependency>
 
@@ -130,29 +158,6 @@ under the License.
 				</exclusion>
 			</exclusions>
 		</dependency>
-
-		<!-- make sure that also logger and JSR is provided -->
-
-		<dependency>
-			<groupId>org.slf4j</groupId>
-			<artifactId>slf4j-api</artifactId>
-			<scope>provided</scope>
-		</dependency>
-
-		<dependency>
-			<groupId>com.google.code.findbugs</groupId>
-			<artifactId>jsr305</artifactId>
-			<scope>provided</scope>
-		</dependency>
-
-		<!-- test dependencies -->
-
-		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-test-utils-junit</artifactId>
-			<version>${project.version}</version>
-			<scope>test</scope>
-		</dependency>
 	</dependencies>
 
 	<build>
@@ -160,11 +165,6 @@ under the License.
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-shade-plugin</artifactId>
-
-				<!-- we need to explicitly override this version, because the -->
-				<!-- earlier versions of the shade plugin have a bug relocating services -->
-				<version>3.0.0</version>
-
 				<executions>
 					<execution>
 						<id>shade-flink</id>
@@ -275,6 +275,9 @@ under the License.
 										<exclude>META-INF/maven/org.apache.commons/**</exclude>
 										<exclude>META-INF/maven/org.apache.flink/flink-hadoop-fs/**</exclude>
 										<exclude>META-INF/maven/org.apache.flink/force-shading/**</exclude>
+										<exclude>META-INF/LICENSE.txt</exclude>
+										<exclude>META-INF/ASL2.0</exclude>
+										<exclude>META-INF/README.txt</exclude>
 										<!-- we use our own "shaded" core-default.xml: core-default-shaded.xml -->
 										<exclude>core-default.xml</exclude>
 										<!-- we only add a core-site.xml with unshaded classnames for the unit tests -->

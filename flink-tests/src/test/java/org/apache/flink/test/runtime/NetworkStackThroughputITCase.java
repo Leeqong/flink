@@ -18,37 +18,36 @@
 
 package org.apache.flink.test.runtime;
 
-import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.core.io.IOReadableWritable;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
-import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.io.network.api.reader.RecordReader;
 import org.apache.flink.runtime.io.network.api.writer.RecordWriter;
+import org.apache.flink.runtime.io.network.api.writer.RecordWriterBuilder;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.jobgraph.DistributionPattern;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
-import org.apache.flink.runtime.minicluster.LocalFlinkMiniCluster;
-import org.apache.flink.runtime.testingUtils.TestingUtils;
-import org.apache.flink.test.util.TestBaseUtils;
+import org.apache.flink.runtime.jobmaster.JobResult;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.util.TestLogger;
 
-import org.junit.Ignore;
+import org.junit.Assert;
+import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Manually test the throughput of the network stack.
  */
-@Ignore
 public class NetworkStackThroughputITCase extends TestLogger {
 
 	private static final Logger LOG = LoggerFactory.getLogger(NetworkStackThroughputITCase.class);
@@ -80,13 +79,13 @@ public class NetworkStackThroughputITCase extends TestLogger {
 
 		@Override
 		public void invoke() throws Exception {
-			RecordWriter<SpeedTestRecord> writer = new RecordWriter<>(getEnvironment().getWriter(0));
+			RecordWriter<SpeedTestRecord> writer = new RecordWriterBuilder<SpeedTestRecord>().build(getEnvironment().getWriter(0));
 
 			try {
 				// Determine the amount of data to send per subtask
 				int dataVolumeGb = getTaskConfiguration().getInteger(NetworkStackThroughputITCase.DATA_VOLUME_GB_CONFIG_KEY, 1);
 
-				long dataMbPerSubtask = (dataVolumeGb * 1024) / getCurrentNumberOfSubtasks();
+				long dataMbPerSubtask = (dataVolumeGb * 10) / getCurrentNumberOfSubtasks();
 				long numRecordsToEmit = (dataMbPerSubtask * 1024 * 1024) / SpeedTestRecord.RECORD_SIZE;
 
 				LOG.info(String.format("%d/%d: Producing %d records (each record: %d bytes, total: %.2f GB)",
@@ -106,6 +105,7 @@ public class NetworkStackThroughputITCase extends TestLogger {
 				}
 			}
 			finally {
+				writer.close();
 				writer.flushAll();
 			}
 		}
@@ -129,7 +129,7 @@ public class NetworkStackThroughputITCase extends TestLogger {
 					SpeedTestRecord.class,
 					getEnvironment().getTaskManagerInfo().getTmpDirectories());
 
-			RecordWriter<SpeedTestRecord> writer = new RecordWriter<>(getEnvironment().getWriter(0));
+			RecordWriter<SpeedTestRecord> writer = new RecordWriterBuilder<SpeedTestRecord>().build(getEnvironment().getWriter(0));
 
 			try {
 				SpeedTestRecord record;
@@ -139,6 +139,7 @@ public class NetworkStackThroughputITCase extends TestLogger {
 			}
 			finally {
 				reader.clearBuffers();
+				writer.close();
 				writer.flushAll();
 			}
 		}
@@ -209,6 +210,7 @@ public class NetworkStackThroughputITCase extends TestLogger {
 
 	// ------------------------------------------------------------------------
 
+	@Test
 	public void testThroughput() throws Exception {
 		Object[][] configParams = new Object[][]{
 				new Object[]{1, false, false, false, 4, 2},
@@ -234,48 +236,52 @@ public class NetworkStackThroughputITCase extends TestLogger {
 
 			final int numTaskManagers = parallelism / numSlotsPerTaskManager;
 
-			final LocalFlinkMiniCluster localFlinkMiniCluster = TestBaseUtils.startCluster(
-				numTaskManagers,
-				numSlotsPerTaskManager,
-				false,
-				false,
-				true);
+			final MiniClusterWithClientResource cluster = new MiniClusterWithClientResource(
+				new MiniClusterResourceConfiguration.Builder()
+					.setNumberTaskManagers(numTaskManagers)
+					.setNumberSlotsPerTaskManager(numSlotsPerTaskManager)
+					.build());
+			cluster.before();
 
 			try {
-				System.out.println(Arrays.toString(p));
+				System.out.println(String.format("Running test with parameters: dataVolumeGB=%s, useForwarder=%s, isSlowSender=%s, isSlowReceiver=%s, parallelism=%s, numSlotsPerTM=%s",
+					dataVolumeGb, useForwarder, isSlowSender, isSlowReceiver, parallelism, numSlotsPerTaskManager));
 				testProgram(
-					localFlinkMiniCluster,
+					cluster,
 					dataVolumeGb,
 					useForwarder,
 					isSlowSender,
 					isSlowReceiver,
 					parallelism);
 			} finally {
-				TestBaseUtils.stopCluster(localFlinkMiniCluster, FutureUtils.toFiniteDuration(TestingUtils.TIMEOUT()));
+				cluster.after();
 			}
 		}
 	}
 
 	private void testProgram(
-			LocalFlinkMiniCluster localFlinkMiniCluster,
+			final MiniClusterWithClientResource cluster,
 			final int dataVolumeGb,
 			final boolean useForwarder,
 			final boolean isSlowSender,
 			final boolean isSlowReceiver,
 			final int parallelism) throws Exception {
-		JobExecutionResult jer = localFlinkMiniCluster.submitJobAndWait(
-			createJobGraph(
-				dataVolumeGb,
-				useForwarder,
-				isSlowSender,
-				isSlowReceiver,
-				parallelism),
-			false);
+		final ClusterClient<?> client = cluster.getClusterClient();
+		final JobGraph jobGraph = createJobGraph(
+			dataVolumeGb,
+			useForwarder,
+			isSlowSender,
+			isSlowReceiver,
+			parallelism);
+		final JobResult jobResult = client.submitJob(jobGraph)
+			.thenCompose(client::requestJobResult)
+			.get();
 
-		long dataVolumeMbit = dataVolumeGb * 8192;
-		long runtimeSecs = jer.getNetRuntime(TimeUnit.SECONDS);
+		Assert.assertFalse(jobResult.getSerializedThrowable().isPresent());
 
-		int mbitPerSecond = (int) (((double) dataVolumeMbit) / runtimeSecs);
+		final long dataVolumeMbit = dataVolumeGb * 8192;
+		final long runtimeSecs = TimeUnit.SECONDS.convert(jobResult.getNetRuntime(), TimeUnit.MILLISECONDS);
+		final int mbitPerSecond = (int) (((double) dataVolumeMbit) / runtimeSecs);
 
 		LOG.info(String.format("Test finished with throughput of %d MBit/s (runtime [secs]: %d, " +
 			"data volume [gb/mbits]: %d/%d)", mbitPerSecond, runtimeSecs, dataVolumeGb, dataVolumeMbit));
@@ -327,13 +333,9 @@ public class NetworkStackThroughputITCase extends TestLogger {
 		return jobGraph;
 	}
 
-	private void runAllTests() throws Exception {
-		testThroughput();
+	public static void main(String[] args) throws Exception {
+		new NetworkStackThroughputITCase().testThroughput();
 
 		System.out.println("Done.");
-	}
-
-	public static void main(String[] args) throws Exception {
-		new NetworkStackThroughputITCase().runAllTests();
 	}
 }

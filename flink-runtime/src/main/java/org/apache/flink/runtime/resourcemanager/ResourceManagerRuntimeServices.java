@@ -20,8 +20,9 @@ package org.apache.flink.runtime.resourcemanager;
 
 import org.apache.flink.runtime.concurrent.ScheduledExecutor;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.metrics.groups.SlotManagerMetricGroup;
 import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManager;
-import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManagerConfiguration;
+import org.apache.flink.runtime.resourcemanager.slotmanager.SlotManagerImpl;
 import org.apache.flink.util.Preconditions;
 
 /**
@@ -45,26 +46,15 @@ public class ResourceManagerRuntimeServices {
 		return jobLeaderIdService;
 	}
 
-	// -------------------- Lifecycle methods -----------------------------------
-
-	public void shutDown() throws Exception {
-		jobLeaderIdService.stop();
-	}
-
 	// -------------------- Static methods --------------------------------------
 
 	public static ResourceManagerRuntimeServices fromConfiguration(
 			ResourceManagerRuntimeServicesConfiguration configuration,
 			HighAvailabilityServices highAvailabilityServices,
-			ScheduledExecutor scheduledExecutor) throws Exception {
+			ScheduledExecutor scheduledExecutor,
+			SlotManagerMetricGroup slotManagerMetricGroup) {
 
-		final SlotManagerConfiguration slotManagerConfiguration = configuration.getSlotManagerConfiguration();
-
-		final SlotManager slotManager = new SlotManager(
-			scheduledExecutor,
-			slotManagerConfiguration.getTaskManagerRequestTimeout(),
-			slotManagerConfiguration.getSlotRequestTimeout(),
-			slotManagerConfiguration.getTaskManagerTimeout());
+		final SlotManager slotManager = createSlotManager(configuration, scheduledExecutor, slotManagerMetricGroup);
 
 		final JobLeaderIdService jobLeaderIdService = new JobLeaderIdService(
 			highAvailabilityServices,
@@ -72,5 +62,16 @@ public class ResourceManagerRuntimeServices {
 			configuration.getJobTimeout());
 
 		return new ResourceManagerRuntimeServices(slotManager, jobLeaderIdService);
+	}
+
+	private static SlotManager createSlotManager(ResourceManagerRuntimeServicesConfiguration configuration, ScheduledExecutor scheduledExecutor, SlotManagerMetricGroup slotManagerMetricGroup) {
+		if (configuration.isDeclarativeResourceManagementEnabled()) {
+			throw new UnsupportedOperationException("Declarative slot manager is not yet implemented.");
+		} else {
+			return new SlotManagerImpl(
+				scheduledExecutor,
+				configuration.getSlotManagerConfiguration(),
+				slotManagerMetricGroup);
+		}
 	}
 }

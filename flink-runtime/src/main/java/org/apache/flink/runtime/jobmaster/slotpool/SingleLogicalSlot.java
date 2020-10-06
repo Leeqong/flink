@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.jobmaster.slotpool;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobmanager.scheduler.Locality;
@@ -35,14 +36,19 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 /**
- * Implementation of the {@link LogicalSlot} which is used by the {@link SlotPool}.
+ * Implementation of the {@link LogicalSlot} which is used by the {@link SlotPoolImpl}.
  */
-public class SingleLogicalSlot implements LogicalSlot, AllocatedSlot.Payload {
+public class SingleLogicalSlot implements LogicalSlot, PhysicalSlot.Payload {
 
 	private static final AtomicReferenceFieldUpdater<SingleLogicalSlot, Payload> PAYLOAD_UPDATER = AtomicReferenceFieldUpdater.newUpdater(
 		SingleLogicalSlot.class,
 		Payload.class,
 		"payload");
+
+	private static final AtomicReferenceFieldUpdater<SingleLogicalSlot, State> STATE_UPDATER = AtomicReferenceFieldUpdater.newUpdater(
+		SingleLogicalSlot.class,
+		State.class,
+		"state");
 
 	private final SlotRequestId slotRequestId;
 
@@ -58,22 +64,44 @@ public class SingleLogicalSlot implements LogicalSlot, AllocatedSlot.Payload {
 	// owner of this slot to which it is returned upon release
 	private final SlotOwner slotOwner;
 
+	private final CompletableFuture<Void> releaseFuture;
+
+	private volatile State state;
+
 	// LogicalSlot.Payload of this slot
 	private volatile Payload payload;
+
+	/** Whether this logical slot will be occupied indefinitely. */
+	private boolean willBeOccupiedIndefinitely;
+
+	@VisibleForTesting
+	public SingleLogicalSlot(
+		SlotRequestId slotRequestId,
+		SlotContext slotContext,
+		@Nullable SlotSharingGroupId slotSharingGroupId,
+		Locality locality,
+		SlotOwner slotOwner) {
+
+		this(slotRequestId, slotContext, slotSharingGroupId, locality, slotOwner, true);
+	}
 
 	public SingleLogicalSlot(
 			SlotRequestId slotRequestId,
 			SlotContext slotContext,
 			@Nullable SlotSharingGroupId slotSharingGroupId,
 			Locality locality,
-			SlotOwner slotOwner) {
+			SlotOwner slotOwner,
+			boolean willBeOccupiedIndefinitely) {
 		this.slotRequestId = Preconditions.checkNotNull(slotRequestId);
 		this.slotContext = Preconditions.checkNotNull(slotContext);
 		this.slotSharingGroupId = slotSharingGroupId;
 		this.locality = Preconditions.checkNotNull(locality);
 		this.slotOwner = Preconditions.checkNotNull(slotOwner);
+		this.willBeOccupiedIndefinitely = willBeOccupiedIndefinitely;
+		this.releaseFuture = new CompletableFuture<>();
 
-		payload = null;
+		this.state = State.ALIVE;
+		this.payload = null;
 	}
 
 	@Override
@@ -93,20 +121,11 @@ public class SingleLogicalSlot implements LogicalSlot, AllocatedSlot.Payload {
 
 	@Override
 	public boolean isAlive() {
-		final Payload currentPayload = payload;
-
-		if (currentPayload != null) {
-			return !currentPayload.getTerminalStateFuture().isDone();
-		} else {
-			// We are always alive if there is no payload assigned yet.
-			// If this slot is released and no payload is assigned, then the TERMINATED_PAYLOAD is assigned
-			return true;
-		}
+		return state == State.ALIVE;
 	}
 
 	@Override
 	public boolean tryAssignPayload(Payload payload) {
-		Preconditions.checkNotNull(payload);
 		return PAYLOAD_UPDATER.compareAndSet(this, null, payload);
 	}
 
@@ -118,15 +137,12 @@ public class SingleLogicalSlot implements LogicalSlot, AllocatedSlot.Payload {
 
 	@Override
 	public CompletableFuture<?> releaseSlot(@Nullable Throwable cause) {
-		// set an already terminated payload if the payload of this slot is still empty
-		tryAssignPayload(TERMINATED_PAYLOAD);
+		if (STATE_UPDATER.compareAndSet(this, State.ALIVE, State.RELEASING)) {
+			signalPayloadRelease(cause);
+			returnSlotToOwner(payload.getTerminalStateFuture());
+		}
 
-		// notify the payload that the slot will be released
-		payload.fail(cause);
-
-		// Wait until the payload has been terminated. Only then, we return the slot to its rightful owner
-		return payload.getTerminalStateFuture()
-			.whenComplete((Object ignored, Throwable throwable) -> slotOwner.returnAllocatedSlot(this));
+		return releaseFuture;
 	}
 
 	@Override
@@ -150,6 +166,28 @@ public class SingleLogicalSlot implements LogicalSlot, AllocatedSlot.Payload {
 		return slotSharingGroupId;
 	}
 
+	public static SingleLogicalSlot allocateFromPhysicalSlot(
+			final SlotRequestId slotRequestId,
+			final PhysicalSlot physicalSlot,
+			final Locality locality,
+			final SlotOwner slotOwner,
+			final boolean slotWillBeOccupiedIndefinitely) {
+
+		final SingleLogicalSlot singleTaskSlot = new SingleLogicalSlot(
+			slotRequestId,
+			physicalSlot,
+			null,
+			locality,
+			slotOwner,
+			slotWillBeOccupiedIndefinitely);
+
+		if (physicalSlot.tryAssignPayload(singleTaskSlot)) {
+			return singleTaskSlot;
+		} else {
+			throw new IllegalStateException("BUG: Unexpected physical slot payload assignment failure!");
+		}
+	}
+
 	// -------------------------------------------------------------------------
 	// AllocatedSlot.Payload implementation
 	// -------------------------------------------------------------------------
@@ -159,10 +197,55 @@ public class SingleLogicalSlot implements LogicalSlot, AllocatedSlot.Payload {
 	 * the logical slot.
 	 *
 	 * @param cause of the payload release
-	 * @return true if the logical slot's payload could be released, otherwise false
 	 */
 	@Override
-	public boolean release(Throwable cause) {
-		return releaseSlot(cause).isDone();
+	public void release(Throwable cause) {
+		if (STATE_UPDATER.compareAndSet(this, State.ALIVE, State.RELEASING)) {
+			signalPayloadRelease(cause);
+		}
+		markReleased();
+		releaseFuture.complete(null);
+	}
+
+	@Override
+	public boolean willOccupySlotIndefinitely() {
+		return willBeOccupiedIndefinitely;
+	}
+
+	private void signalPayloadRelease(Throwable cause) {
+		tryAssignPayload(TERMINATED_PAYLOAD);
+		payload.fail(cause);
+	}
+
+	private void returnSlotToOwner(CompletableFuture<?> terminalStateFuture) {
+		terminalStateFuture
+			.whenComplete((Object ignored, Throwable throwable) -> {
+
+				if (state == State.RELEASING) {
+					slotOwner.returnLogicalSlot(this);
+				}
+
+				markReleased();
+
+				if (throwable != null) {
+					releaseFuture.completeExceptionally(throwable);
+				} else {
+					releaseFuture.complete(null);
+				}
+			});
+	}
+
+	private void markReleased() {
+		state = State.RELEASED;
+	}
+
+	// -------------------------------------------------------------------------
+	// Internal classes
+	// -------------------------------------------------------------------------
+
+	enum State {
+		ALIVE,
+		RELEASING,
+		RELEASED
 	}
 }

@@ -18,8 +18,7 @@
 
 package org.apache.flink.core.memory;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.flink.util.Preconditions;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -31,15 +30,7 @@ import java.util.Arrays;
 /**
  * A simple and efficient serializer for the {@link java.io.DataOutput} interface.
  */
-public class DataOutputSerializer implements DataOutputView {
-
-	private static final Logger LOG = LoggerFactory.getLogger(DataOutputSerializer.class);
-
-	private static final int PRUNE_BUFFER_THRESHOLD = 5 * 1024 * 1024;
-
-	// ------------------------------------------------------------------------
-
-	private final byte[] startBuffer;
+public class DataOutputSerializer implements DataOutputView, MemorySegmentWritable {
 
 	private byte[] buffer;
 
@@ -54,8 +45,7 @@ public class DataOutputSerializer implements DataOutputView {
 			throw new IllegalArgumentException();
 		}
 
-		this.startBuffer = new byte[startSize];
-		this.buffer = this.startBuffer;
+		this.buffer = new byte[startSize];
 		this.wrapper = ByteBuffer.wrap(buffer);
 	}
 
@@ -65,10 +55,36 @@ public class DataOutputSerializer implements DataOutputView {
 		return this.wrapper;
 	}
 
+	/**
+	 * @deprecated Replaced by {@link #getSharedBuffer()} for a better, safer name.
+	 */
+	@Deprecated
 	public byte[] getByteArray() {
+		return getSharedBuffer();
+	}
+
+	/**
+	 * Gets a reference to the internal byte buffer. This buffer may be larger than the
+	 * actual serialized data. Only the bytes from zero to {@link #length()} are valid.
+	 * The buffer will also be overwritten with the next write calls.
+	 *
+	 * <p>This method is useful when trying to avid byte copies, but should be used carefully.
+	 *
+	 * @return A reference to the internal shared and reused buffer.
+	 */
+	public byte[] getSharedBuffer() {
 		return buffer;
 	}
 
+	/**
+	 * Gets a copy of the buffer that has the right length for the data serialized so far.
+	 * The returned buffer is an exclusive copy and can be safely used without being overwritten
+	 * by future write calls to this serializer.
+	 *
+	 * <p>This method is equivalent to {@code Arrays.copyOf(getSharedBuffer(), length());}
+	 *
+	 * @return A non-shared copy of the serialization buffer.
+	 */
 	public byte[] getCopyOfBuffer() {
 		return Arrays.copyOf(buffer, position);
 	}
@@ -79,17 +95,6 @@ public class DataOutputSerializer implements DataOutputView {
 
 	public int length() {
 		return this.position;
-	}
-
-	public void pruneBuffer() {
-		if (this.buffer.length > PRUNE_BUFFER_THRESHOLD) {
-			if (LOG.isDebugEnabled()) {
-				LOG.debug("Releasing serialization buffer of " + this.buffer.length + " bytes.");
-			}
-
-			this.buffer = this.startBuffer;
-			this.wrapper = ByteBuffer.wrap(this.buffer);
-		}
 	}
 
 	@Override
@@ -123,6 +128,18 @@ public class DataOutputSerializer implements DataOutputView {
 			resize(len);
 		}
 		System.arraycopy(b, off, this.buffer, this.position, len);
+		this.position += len;
+	}
+
+	@Override
+	public void write(MemorySegment segment, int off, int len) throws IOException {
+		if (len < 0 || off < 0 || off > segment.size() - len) {
+			throw new IndexOutOfBoundsException(String.format("offset: %d, length: %d, size: %d", off, len, segment.size()));
+		}
+		if (this.position > this.buffer.length - len) {
+			resize(len);
+		}
+		segment.get(off, this.buffer, this.position, len);
 		this.position += len;
 	}
 
@@ -190,6 +207,13 @@ public class DataOutputSerializer implements DataOutputView {
 		}
 		UNSAFE.putInt(this.buffer, BASE_OFFSET + this.position, v);
 		this.position += 4;
+	}
+
+	public void writeIntUnsafe(int v, int pos) throws IOException {
+		if (LITTLE_ENDIAN) {
+			v = Integer.reverseBytes(v);
+		}
+		UNSAFE.putInt(this.buffer, BASE_OFFSET + pos, v);
 	}
 
 	@SuppressWarnings("restriction")
@@ -321,6 +345,15 @@ public class DataOutputSerializer implements DataOutputView {
 
 		source.readFully(this.buffer, this.position, numBytes);
 		this.position += numBytes;
+	}
+
+	public void setPosition(int position) {
+		Preconditions.checkArgument(position >= 0 && position <= this.position, "Position out of bounds.");
+		this.position = position;
+	}
+
+	public void setPositionUnsafe(int position) {
+		this.position = position;
 	}
 
 	// ------------------------------------------------------------------------

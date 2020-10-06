@@ -20,7 +20,6 @@ package org.apache.flink.streaming.api.scala
 
 import org.apache.flink.api.common.state.MapStateDescriptor
 import org.apache.flink.api.common.typeinfo.{BasicTypeInfo, TypeInformation}
-import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
 import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction
@@ -28,7 +27,7 @@ import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.test.util.AbstractTestBase
 import org.apache.flink.util.Collector
 import org.junit.Assert.assertEquals
-import org.junit.{Test}
+import org.junit.Test
 
 /**
   * ITCase for the [[org.apache.flink.api.common.state.BroadcastState]].
@@ -55,7 +54,6 @@ class BroadcastStateITCase extends AbstractTestBase {
       5L -> "test:5")
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
 
     val srcOne = env
       .generateSequence(0L, 5L)
@@ -109,7 +107,7 @@ class TestBroadcastProcessFunction(
   @throws[Exception]
   override def processElement(
       value: Long,
-      ctx: KeyedBroadcastProcessFunction[Long, Long, String, String]#KeyedReadOnlyContext,
+      ctx: KeyedBroadcastProcessFunction[Long, Long, String, String]#ReadOnlyContext,
       out: Collector[String]): Unit = {
 
     val currentTime = nextTimerTimestamp
@@ -121,7 +119,7 @@ class TestBroadcastProcessFunction(
   @throws[Exception]
   override def processBroadcastElement(
       value: String,
-      ctx: KeyedBroadcastProcessFunction[Long, Long, String, String]#KeyedContext,
+      ctx: KeyedBroadcastProcessFunction[Long, Long, String, String]#Context,
       out: Collector[String]): Unit = {
 
     val key = value.split(":")(1).toLong

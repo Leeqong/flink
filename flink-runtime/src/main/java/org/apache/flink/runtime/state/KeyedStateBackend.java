@@ -21,7 +21,7 @@ package org.apache.flink.runtime.state;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.runtime.state.heap.InternalKeyContext;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.util.Disposable;
 
 import java.util.stream.Stream;
@@ -31,13 +31,24 @@ import java.util.stream.Stream;
  *
  * @param <K> The key by which state is keyed.
  */
-public interface KeyedStateBackend<K> extends InternalKeyContext<K>, Disposable {
+public interface KeyedStateBackend<K>
+	extends KeyedStateFactory, PriorityQueueSetFactory, Disposable {
 
 	/**
 	 * Sets the current key that is used for partitioned state.
 	 * @param newKey The new current key.
 	 */
 	void setCurrentKey(K newKey);
+
+	/**
+	 * @return Current key.
+	 */
+	K getCurrentKey();
+
+	/**
+	 * @return Serializer of the key.
+	 */
+	TypeSerializer<K> getKeySerializer();
 
 	/**
 	 * Applies the provided {@link KeyedStateFunction} to the state with the provided
@@ -66,11 +77,19 @@ public interface KeyedStateBackend<K> extends InternalKeyContext<K>, Disposable 
 	<N> Stream<K> getKeys(String state, N namespace);
 
 	/**
+	 * @return A stream of all keys for the given state and namespace. Modifications to the state during iterating
+	 * 		   over it keys are not supported. Implementations go not make any ordering guarantees about the returned
+	 * 		   tupes. Two records with the same key or namespace may not be returned near each other in the stream.
+	 * @param state State variable for which existing keys will be returned.
+	 */
+	<N> Stream<Tuple2<K, N>> getKeysAndNamespaces(String state);
+
+	/**
 	 * Creates or retrieves a keyed state backed by this state backend.
 	 *
 	 * @param namespaceSerializer The serializer used for the namespace type of the state
 	 * @param stateDescriptor The identifier for the state. This contains name and can create a default state value.
-	 *    
+	 *
 	 * @param <N> The type of the namespace.
 	 * @param <S> The type of the state.
 	 *
@@ -84,7 +103,7 @@ public interface KeyedStateBackend<K> extends InternalKeyContext<K>, Disposable 
 
 	/**
 	 * Creates or retrieves a partitioned state backed by this state backend.
-	 * 
+	 *
 	 * TODO: NOTE: This method does a lot of work caching / retrieving states just to update the namespace.
 	 *       This method should be removed for the sake of namespaces being lazily fetched from the keyed
 	 *       state backend, or being set on the state directly.
@@ -105,4 +124,21 @@ public interface KeyedStateBackend<K> extends InternalKeyContext<K>, Disposable 
 
 	@Override
 	void dispose();
+
+	/** State backend will call {@link KeySelectionListener#keySelected} when key context is switched if supported. */
+	void registerKeySelectionListener(KeySelectionListener<K> listener);
+
+	/**
+	 * Stop calling listener registered in {@link #registerKeySelectionListener}.
+	 *
+	 * @return returns true iff listener was registered before.
+	 */
+	boolean deregisterKeySelectionListener(KeySelectionListener<K> listener);
+
+	/** Listener is given a callback when {@link #setCurrentKey} is called (key context changes). */
+	@FunctionalInterface
+	interface KeySelectionListener<K> {
+		/** Callback when key context is switched. */
+		void keySelected(K newKey);
+	}
 }

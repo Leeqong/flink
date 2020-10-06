@@ -82,10 +82,10 @@ public class TaskStateManagerImplTest extends TestLogger {
 		KeyGroupRange keyGroupRange = new KeyGroupRange(0,1);
 		// Remote state of operator 1 has only managed keyed state.
 		OperatorSubtaskState jmOperatorSubtaskState_1 =
-			new OperatorSubtaskState(null, null, StateHandleDummyUtil.createNewKeyedStateHandle(keyGroupRange), null);
+			new OperatorSubtaskState(null, null, StateHandleDummyUtil.createNewKeyedStateHandle(keyGroupRange), null, null, null);
 		// Remote state of operator 1 has only raw keyed state.
 		OperatorSubtaskState jmOperatorSubtaskState_2 =
-			new OperatorSubtaskState(null, null, null, StateHandleDummyUtil.createNewKeyedStateHandle(keyGroupRange));
+			new OperatorSubtaskState(null, null, null, StateHandleDummyUtil.createNewKeyedStateHandle(keyGroupRange), null, null);
 
 		jmTaskStateSnapshot.putSubtaskStateByOperatorID(operatorID_1, jmOperatorSubtaskState_1);
 		jmTaskStateSnapshot.putSubtaskStateByOperatorID(operatorID_2, jmOperatorSubtaskState_2);
@@ -94,7 +94,7 @@ public class TaskStateManagerImplTest extends TestLogger {
 
 		// Only operator 1 has a local alternative for the managed keyed state.
 		OperatorSubtaskState tmOperatorSubtaskState_1 =
-			new OperatorSubtaskState(null, null, StateHandleDummyUtil.createNewKeyedStateHandle(keyGroupRange), null);
+			new OperatorSubtaskState(null, null, StateHandleDummyUtil.createNewKeyedStateHandle(keyGroupRange), null, null, null);
 
 		tmTaskStateSnapshot.putSubtaskStateByOperatorID(operatorID_1, tmOperatorSubtaskState_1);
 
@@ -177,7 +177,7 @@ public class TaskStateManagerImplTest extends TestLogger {
 		JobID jobID = new JobID(42L, 43L);
 		AllocationID allocationID = new AllocationID(4711L, 23L);
 		JobVertexID jobVertexID = new JobVertexID(12L, 34L);
-		ExecutionAttemptID executionAttemptID = new ExecutionAttemptID(23L, 24L);
+		ExecutionAttemptID executionAttemptID = new ExecutionAttemptID();
 		TestCheckpointResponder checkpointResponderMock = new TestCheckpointResponder();
 
 		Executor directExecutor = Executors.directExecutor();
@@ -193,7 +193,7 @@ public class TaskStateManagerImplTest extends TestLogger {
 				new LocalRecoveryDirectoryProviderImpl(allocBaseDirs, jobID, jobVertexID, 0);
 
 			LocalRecoveryConfig localRecoveryConfig =
-				new LocalRecoveryConfig(LocalRecoveryConfig.LocalRecoveryMode.ENABLE_FILE_BASED, directoryProvider);
+				new LocalRecoveryConfig(true, directoryProvider);
 
 			TaskLocalStateStore taskLocalStateStore =
 				new TaskLocalStateStoreImpl(jobID, allocationID, jobVertexID, 13, localRecoveryConfig, directExecutor);
@@ -220,8 +220,8 @@ public class TaskStateManagerImplTest extends TestLogger {
 			}
 
 			Assert.assertEquals(
-				localRecoveryConfFromTaskLocalStateStore.getLocalRecoveryMode(),
-				localRecoveryConfFromTaskStateManager.getLocalRecoveryMode());
+				localRecoveryConfFromTaskLocalStateStore.isLocalRecoveryEnabled(),
+				localRecoveryConfFromTaskStateManager.isLocalRecoveryEnabled());
 		} finally {
 			tmpFolder.delete();
 		}

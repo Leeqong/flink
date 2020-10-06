@@ -1,7 +1,7 @@
 ---
 title: "Queryable State"
 nav-parent_id: streaming_state
-nav-pos: 3
+nav-pos: 4
 is_beta: true
 ---
 <!--
@@ -60,7 +60,7 @@ The Queryable State feature consists of three main entities:
  returning it to the client, and 
  3. the `QueryableStateServer` which runs on each `TaskManager` and is responsible for serving the locally stored state.
  
-In a nutshell, the client will connect to one of the proxies and send a request for the state associated with a specific 
+The client connects to one of the proxies and sends a request for the state associated with a specific 
 key, `k`. As stated in [Working with State]({{ site.baseurl }}/dev/stream/state/state.html), keyed state is organized in 
 *Key Groups*, and each `TaskManager` is assigned a number of these key groups. To discover which `TaskManager` is 
 responsible for the key group holding `k`, the proxy will ask the `JobManager`. Based on the answer, the proxy will 
@@ -69,10 +69,12 @@ response back to the client.
 
 ## Activating Queryable State
 
-To enable queryable state on your Flink cluster, you just have to copy the 
-`flink-queryable-state-runtime{{ site.scala_version_suffix }}-{{site.version }}.jar` 
+To enable queryable state on your Flink cluster, you need to do the following:
+
+ 1. copy the `flink-queryable-state-runtime{{ site.scala_version_suffix }}-{{site.version }}.jar` 
 from the `opt/` folder of your [Flink distribution](https://flink.apache.org/downloads.html "Apache Flink: Downloads"), 
-to the `lib/` folder. Otherwise, the queryable state feature is not enabled. 
+to the `lib/` folder.
+ 2. set the property `queryable-state.enable` to `true`. See the [Configuration]({{ site.baseurl }}/ops/config.html#queryable-state) documentation for details and additional parameters.
 
 To verify that your cluster is running with queryable state enabled, check the logs of any 
 task manager for the line: `"Started the Queryable State Proxy Server @ ..."`.
@@ -104,11 +106,6 @@ QueryableStateStream asQueryableState(
 // Shortcut for explicit ValueStateDescriptor variant
 QueryableStateStream asQueryableState(String queryableStateName)
 
-// FoldingState
-QueryableStateStream asQueryableState(
-    String queryableStateName,
-    FoldingStateDescriptor stateDescriptor)
-
 // ReducingState
 QueryableStateStream asQueryableState(
     String queryableStateName,
@@ -128,7 +125,7 @@ In a program like the following, all records of the keyed stream will be used to
 `ValueState.update(value)`:
 
 {% highlight java %}
-stream.keyBy(0).asQueryableState("query-name")
+stream.keyBy(value -> value.f0).asQueryableState("query-name")
 {% endhighlight %}
 
 This acts like the Scala API's `flatMapWithState`.
@@ -143,8 +140,7 @@ can be made queryable by making the appropriate state descriptor queryable via
 ValueStateDescriptor<Tuple2<Long, Long>> descriptor =
         new ValueStateDescriptor<>(
                 "average", // the state name
-                TypeInformation.of(new TypeHint<Tuple2<Long, Long>>() {}), // type information
-                Tuple2.of(0L, 0L)); // default value of the state, if nothing was set
+                TypeInformation.of(new TypeHint<Tuple2<Long, Long>>() {})); // type information
 descriptor.setQueryable("query-name"); // queryable state name
 {% endhighlight %}
 
@@ -154,7 +150,7 @@ descriptor.setQueryable("query-name"); // queryable state name
 </div>
 
 This variant has no limitations as to which type of state can be made queryable. This means that this can be used for 
-any `ValueState`, `ReduceState`, `ListState`, `MapState`, `AggregatingState`, and the currently deprecated `FoldingState`.
+any `ValueState`, `ReduceState`, `ListState`, `MapState`, and `AggregatingState`.
 
 ## Querying State
 
@@ -162,24 +158,29 @@ So far, you have set up your cluster to run with queryable state and you have de
 queryable. Now it is time to see how to query this state. 
 
 For this you can use the `QueryableStateClient` helper class. This is available in the `flink-queryable-state-client` 
-jar which you have to explicitly include as a dependency in the `pom.xml` of your project, as shown below:
+jar which must be explicitly included as a dependency in the `pom.xml` of your project along with `flink-core`, as shown below:
 
 <div data-lang="java" markdown="1">
 {% highlight xml %}
 <dependency>
   <groupId>org.apache.flink</groupId>
-  <artifactId>flink-queryable-state-client-java_{{ site.scala_version_suffix }}</artifactId>
-  <version>{{site.version }}</version>
+  <artifactId>flink-core</artifactId>
+  <version>{{ site.version }}</version>
+</dependency>
+<dependency>
+  <groupId>org.apache.flink</groupId>
+  <artifactId>flink-queryable-state-client-java</artifactId>
+  <version>{{ site.version }}</version>
 </dependency>
 {% endhighlight %}
 </div>
 
-For more on this, you can check how to [set up a Flink program]({{ site.baseurl }}/dev/linking_with_flink.html).
+For more on this, you can check how to [set up a Flink program]({{ site.baseurl }}/dev/project-configuration.html).
 
 The `QueryableStateClient` will submit your query to the internal proxy, which will then process your query and return 
 the final result. The only requirement to initialize the client is to provide a valid `TaskManager` hostname (remember 
 that there is a queryable state proxy running on each task manager) and the port where the proxy listens. More on how 
-to configure the proxy and state server port(s) in the [Configuration Section](#Configuration).
+to configure the proxy and state server port(s) in the [Configuration Section](#configuration).
 
 {% highlight java %}
 QueryableStateClient client = new QueryableStateClient(tmHostname, proxyPort);
@@ -189,11 +190,11 @@ With the client ready, to query a state of type `V`, associated with a key of ty
 
 {% highlight java %}
 CompletableFuture<S> getKvState(
-    final JobID jobId,
-    final String queryableStateName,
-    final K key,
-    final TypeInformation<K> keyTypeInfo,
-    final StateDescriptor<S, V> stateDescriptor)
+    JobID jobId,
+    String queryableStateName,
+    K key,
+    TypeInformation<K> keyTypeInfo,
+    StateDescriptor<S, V> stateDescriptor)
 {% endhighlight %}
 
 The above returns a `CompletableFuture` eventually holding the state value for the queryable state instance identified 
@@ -204,10 +205,10 @@ to serialize/deserialize it.
 
 The careful reader will notice that the returned future contains a value of type `S`, *i.e.* a `State` object containing
 the actual value. This can be any of the state types supported by Flink: `ValueState`, `ReduceState`, `ListState`, `MapState`,
-`AggregatingState`, and the currently deprecated `FoldingState`. 
+and `AggregatingState`. 
 
 <div class="alert alert-info">
-  <strong>Note:</strong>These state objects do not allow modifications to the contained state. You can use them to get 
+  <strong>Note:</strong> These state objects do not allow modifications to the contained state. You can use them to get 
   the actual value of the state, <i>e.g.</i> using <code>valueState.get()</code>, or iterate over
   the contained <code><K, V></code> entries, <i>e.g.</i> using the <code>mapState.entries()</code>, but you cannot 
   modify them. As an example, calling the <code>add()</code> method on a returned list state will throw an 
@@ -224,7 +225,7 @@ the actual value. This can be any of the state types supported by Flink: `ValueS
 
 The following example extends the `CountWindowAverage` example
 (see [Using Managed Keyed State]({{ site.baseurl }}/dev/stream/state/state.html#using-managed-keyed-state))
-by making it queryable and showing how to query this value:
+by making it queryable and shows how to query this value:
 
 {% highlight java %}
 public class CountWindowAverage extends RichFlatMapFunction<Tuple2<Long, Long>, Tuple2<Long, Long>> {
@@ -249,8 +250,7 @@ public class CountWindowAverage extends RichFlatMapFunction<Tuple2<Long, Long>, 
         ValueStateDescriptor<Tuple2<Long, Long>> descriptor =
                 new ValueStateDescriptor<>(
                         "average", // the state name
-                        TypeInformation.of(new TypeHint<Tuple2<Long, Long>>() {}), // type information
-                        Tuple2.of(0L, 0L)); // default value of the state, if nothing was set
+                        TypeInformation.of(new TypeHint<Tuple2<Long, Long>>() {})); // type information
         descriptor.setQueryable("query-name");
         sum = getRuntimeContext().getState(descriptor);
     }
@@ -266,8 +266,7 @@ QueryableStateClient client = new QueryableStateClient(tmHostname, proxyPort);
 ValueStateDescriptor<Tuple2<Long, Long>> descriptor =
         new ValueStateDescriptor<>(
           "average",
-          TypeInformation.of(new TypeHint<Tuple2<Long, Long>>() {}),
-          Tuple2.of(0L, 0L));
+          TypeInformation.of(new TypeHint<Tuple2<Long, Long>>() {}));
 
 CompletableFuture<ValueState<Tuple2<Long, Long>>> resultFuture =
         client.getKvState(jobId, "query-name", key, BasicTypeInfo.LONG_TYPE_INFO, descriptor);
@@ -288,19 +287,19 @@ The following configuration parameters influence the behaviour of the queryable 
 They are defined in `QueryableStateOptions`.
 
 ### State Server
-* `query.server.ports`: the server port range of the queryable state server. This is useful to avoid port clashes if more 
+* `queryable-state.server.ports`: the server port range of the queryable state server. This is useful to avoid port clashes if more 
    than 1 task managers run on the same machine. The specified range can be: a port: "9123", a range of ports: "50100-50200",
    or a list of ranges and or points: "50100-50200,50300-50400,51234". The default port is 9067.
-* `query.server.network-threads`: number of network (event loop) threads receiving incoming requests for the state server (0 => #slots)
-* `query.server.query-threads`: number of threads handling/serving incoming requests for the state server (0 => #slots).
+* `queryable-state.server.network-threads`: number of network (event loop) threads receiving incoming requests for the state server (0 => #slots)
+* `queryable-state.server.query-threads`: number of threads handling/serving incoming requests for the state server (0 => #slots).
 
 
 ### Proxy
-* `query.proxy.ports`: the server port range of the queryable state proxy. This is useful to avoid port clashes if more 
+* `queryable-state.proxy.ports`: the server port range of the queryable state proxy. This is useful to avoid port clashes if more 
   than 1 task managers run on the same machine. The specified range can be: a port: "9123", a range of ports: "50100-50200",
   or a list of ranges and or points: "50100-50200,50300-50400,51234". The default port is 9069.
-* `query.proxy.network-threads`: number of network (event loop) threads receiving incoming requests for the client proxy (0 => #slots)
-* `query.proxy.query-threads`: number of threads handling/serving incoming requests for the client proxy (0 => #slots).
+* `queryable-state.proxy.network-threads`: number of network (event loop) threads receiving incoming requests for the client proxy (0 => #slots)
+* `queryable-state.proxy.query-threads`: number of threads handling/serving incoming requests for the client proxy (0 => #slots).
 
 ## Limitations
 

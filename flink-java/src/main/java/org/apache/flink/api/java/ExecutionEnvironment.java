@@ -24,12 +24,11 @@ import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.InvalidProgramException;
 import org.apache.flink.api.common.JobExecutionResult;
-import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.Plan;
+import org.apache.flink.api.common.cache.DistributedCache;
 import org.apache.flink.api.common.cache.DistributedCache.DistributedCacheEntry;
 import org.apache.flink.api.common.io.FileInputFormat;
 import org.apache.flink.api.common.io.InputFormat;
-import org.apache.flink.api.common.operators.OperatorInformation;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -43,35 +42,46 @@ import org.apache.flink.api.java.io.TextValueInputFormat;
 import org.apache.flink.api.java.operators.DataSink;
 import org.apache.flink.api.java.operators.DataSource;
 import org.apache.flink.api.java.operators.Operator;
-import org.apache.flink.api.java.operators.OperatorTranslation;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.PojoTypeInfo;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
 import org.apache.flink.api.java.typeutils.TypeExtractor;
 import org.apache.flink.api.java.typeutils.ValueTypeInfo;
-import org.apache.flink.api.java.typeutils.runtime.kryo.Serializers;
-import org.apache.flink.configuration.ConfigConstants;
+import org.apache.flink.api.java.utils.PlanGenerator;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.configuration.PipelineOptions;
+import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.configuration.RestOptions;
+import org.apache.flink.core.execution.DefaultExecutorServiceLoader;
+import org.apache.flink.core.execution.DetachedJobExecutionResult;
+import org.apache.flink.core.execution.JobClient;
+import org.apache.flink.core.execution.JobListener;
+import org.apache.flink.core.execution.PipelineExecutor;
+import org.apache.flink.core.execution.PipelineExecutorFactory;
+import org.apache.flink.core.execution.PipelineExecutorServiceLoader;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.types.StringValue;
+import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.NumberSequenceIterator;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SplittableIterator;
-import org.apache.flink.util.Visitor;
+import org.apache.flink.util.WrappingRuntimeException;
 
 import com.esotericsoftware.kryo.Serializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -94,13 +104,16 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * @see RemoteEnvironment
  */
 @Public
-public abstract class ExecutionEnvironment {
+public class ExecutionEnvironment {
 
 	/** The logger used by the environment and its subclasses. */
 	protected static final Logger LOG = LoggerFactory.getLogger(ExecutionEnvironment.class);
 
 	/** The environment of the context (local by default, cluster if invoked through command line). */
-	private static ExecutionEnvironmentFactory contextEnvironmentFactory;
+	private static ExecutionEnvironmentFactory contextEnvironmentFactory = null;
+
+	/** The ThreadLocal used to store {@link ExecutionEnvironmentFactory}. */
+	private static final ThreadLocal<ExecutionEnvironmentFactory> threadLocalContextEnvironmentFactory = new ThreadLocal<>();
 
 	/** The default parallelism used by local environments. */
 	private static int defaultLocalDop = Runtime.getRuntime().availableProcessors();
@@ -116,21 +129,85 @@ public abstract class ExecutionEnvironment {
 	/** Result from the latest execution, to make it retrievable when using eager execution methods. */
 	protected JobExecutionResult lastJobExecutionResult;
 
-	/** The ID of the session, defined by this execution environment. Sessions and Jobs are same in
-	 *  Flink, as Jobs can consist of multiple parts that are attached to the growing dataflow graph. */
-	protected JobID jobID;
-
-	/** The session timeout in seconds. */
-	protected long sessionTimeout;
-
 	/** Flag to indicate whether sinks have been cleared in previous executions. */
 	private boolean wasExecuted = false;
+
+	private final PipelineExecutorServiceLoader executorServiceLoader;
+
+	private final Configuration configuration;
+
+	private final ClassLoader userClassloader;
+
+	private final List<JobListener> jobListeners = new ArrayList<>();
+
+	/**
+	 * Creates a new {@link ExecutionEnvironment} that will use the given {@link Configuration} to
+	 * configure the {@link PipelineExecutor}.
+	 */
+	@PublicEvolving
+	public ExecutionEnvironment(final Configuration configuration) {
+		this(configuration, null);
+	}
+
+	/**
+	 * Creates a new {@link ExecutionEnvironment} that will use the given {@link Configuration} to
+	 * configure the {@link PipelineExecutor}.
+	 *
+	 * <p>In addition, this constructor allows specifying the user code {@link ClassLoader}.
+	 */
+	@PublicEvolving
+	public ExecutionEnvironment(final Configuration configuration, final ClassLoader userClassloader) {
+		this(new DefaultExecutorServiceLoader(), configuration, userClassloader);
+	}
+
+	/**
+	 * Creates a new {@link ExecutionEnvironment} that will use the given {@link
+	 * Configuration} to configure the {@link PipelineExecutor}.
+	 *
+	 * <p>In addition, this constructor allows specifying the {@link PipelineExecutorServiceLoader} and
+	 * user code {@link ClassLoader}.
+	 */
+	@PublicEvolving
+	public ExecutionEnvironment(
+			final PipelineExecutorServiceLoader executorServiceLoader,
+			final Configuration configuration,
+			final ClassLoader userClassloader) {
+		this.executorServiceLoader = checkNotNull(executorServiceLoader);
+		this.configuration = checkNotNull(configuration);
+		this.userClassloader = userClassloader == null ? getClass().getClassLoader() : userClassloader;
+
+		// the configuration of a job or an operator can be specified at the following places:
+		//     i) at the operator level using e.g. parallelism using the SingleOutputStreamOperator.setParallelism().
+		//     ii) programmatically by using e.g. the env.setRestartStrategy() method
+		//     iii) in the configuration passed here
+		//
+		// if specified in multiple places, the priority order is the above.
+		//
+		// Given this, it is safe to overwrite the execution config default values here because all other ways assume
+		// that the env is already instantiated so they will overwrite the value passed here.
+		this.configure(this.configuration, this.userClassloader);
+	}
 
 	/**
 	 * Creates a new Execution Environment.
 	 */
 	protected ExecutionEnvironment() {
-		jobID = JobID.generate();
+		this(new Configuration());
+	}
+
+	@Internal
+	public ClassLoader getUserCodeClassLoader() {
+		return userClassloader;
+	}
+
+	@Internal
+	public PipelineExecutorServiceLoader getExecutorServiceLoader() {
+		return executorServiceLoader;
+	}
+
+	@Internal
+	public Configuration getConfiguration() {
+		return this.configuration;
 	}
 
 	// --------------------------------------------------------------------------------------------
@@ -144,6 +221,13 @@ public abstract class ExecutionEnvironment {
 	 */
 	public ExecutionConfig getConfig() {
 		return config;
+	}
+
+	/**
+	 * Gets the config JobListeners.
+	 */
+	protected List<JobListener> getJobListeners() {
+		return jobListeners;
 	}
 
 	/**
@@ -242,68 +326,6 @@ public abstract class ExecutionEnvironment {
 	}
 
 	// --------------------------------------------------------------------------------------------
-	//  Session Management
-	// --------------------------------------------------------------------------------------------
-
-	/**
-	 * Gets the JobID by which this environment is identified. The JobID sets the execution context
-	 * in the cluster or local environment.
-	 *
-	 * @return The JobID of this environment.
-	 * @see #getIdString()
-	 */
-	@PublicEvolving
-	public JobID getId() {
-		return this.jobID;
-	}
-
-	/**
-	 * Gets the JobID by which this environment is identified, as a string.
-	 *
-	 * @return The JobID as a string.
-	 * @see #getId()
-	 */
-	@PublicEvolving
-	public String getIdString() {
-		return this.jobID.toString();
-	}
-
-	/**
-	 * Sets the session timeout to hold the intermediate results of a job. This only
-	 * applies the updated timeout in future executions.
-	 *
-	 * @param timeout The timeout, in seconds.
-	 */
-	@PublicEvolving
-	public void setSessionTimeout(long timeout) {
-		throw new IllegalStateException("Support for sessions is currently disabled. " +
-				"It will be enabled in future Flink versions.");
-		// Session management is disabled, revert this commit to enable
-		//if (timeout < 0) {
-		//	throw new IllegalArgumentException("The session timeout must not be less than zero.");
-		//}
-		//this.sessionTimeout = timeout;
-	}
-
-	/**
-	 * Gets the session timeout for this environment. The session timeout defines for how long
-	 * after an execution, the job and its intermediate results will be kept for future
-	 * interactions.
-	 *
-	 * @return The session timeout, in seconds.
-	 */
-	@PublicEvolving
-	public long getSessionTimeout() {
-		return sessionTimeout;
-	}
-
-	/**
-	 * Starts a new session, discarding the previous data flow and all of its intermediate results.
-	 */
-	@PublicEvolving
-	public abstract void startNewSession() throws Exception;
-
-	// --------------------------------------------------------------------------------------------
 	//  Registry for types and serializers
 	// --------------------------------------------------------------------------------------------
 
@@ -375,6 +397,42 @@ public abstract class ExecutionEnvironment {
 		}
 	}
 
+	/**
+	 * Sets all relevant options contained in the {@link ReadableConfig} such as e.g.
+	 * {@link PipelineOptions#CACHED_FILES}. It will reconfigure
+	 * {@link ExecutionEnvironment} and {@link ExecutionConfig}.
+	 *
+	 * <p>It will change the value of a setting only if a corresponding option was set in the
+	 * {@code configuration}. If a key is not present, the current value of a field will remain
+	 * untouched.
+	 *
+	 * @param configuration a configuration to read the values from
+	 * @param classLoader a class loader to use when loading classes
+	 */
+	@PublicEvolving
+	public void configure(ReadableConfig configuration, ClassLoader classLoader) {
+		configuration.getOptional(DeploymentOptions.JOB_LISTENERS)
+			.ifPresent(listeners -> registerCustomListeners(classLoader, listeners));
+		configuration.getOptional(PipelineOptions.CACHED_FILES)
+			.ifPresent(f -> {
+				this.cacheFile.clear();
+				this.cacheFile.addAll(DistributedCache.parseCachedFilesFromString(f));
+			});
+		config.configure(configuration, classLoader);
+	}
+
+	private void registerCustomListeners(final ClassLoader classLoader, final List<String> listeners) {
+		for (String listener : listeners) {
+			try {
+				final JobListener jobListener = InstantiationUtil.instantiate(
+						listener, JobListener.class, classLoader);
+				jobListeners.add(jobListener);
+			} catch (FlinkException e) {
+				throw new WrappingRuntimeException("Could not load JobListener : " + listener, e);
+			}
+		}
+	}
+
 	// --------------------------------------------------------------------------------------------
 	//  Data set creations
 	// --------------------------------------------------------------------------------------------
@@ -383,7 +441,7 @@ public abstract class ExecutionEnvironment {
 
 	/**
 	 * Creates a {@link DataSet} that represents the Strings produced by reading the given file line wise.
-	 * The file will be read with the system's default character set.
+	 * The file will be read with the UTF-8 character set.
 	 *
 	 * @param filePath The path of the file, as a URI (e.g., "file:///some/local/file" or "hdfs://host:port/file/path").
 	 * @return A {@link DataSet} that represents the data read from the given file as text lines.
@@ -418,7 +476,7 @@ public abstract class ExecutionEnvironment {
 	 * {@link StringValue} objects, rather than Java Strings. StringValues can be used to tune implementations
 	 * to be less object and garbage collection heavy.
 	 *
-	 * <p>The file will be read with the system's default character set.
+	 * <p>The file will be read with the UTF-8 character set.
 	 *
 	 * @param filePath The path of the file, as a URI (e.g., "file:///some/local/file" or "hdfs://host:port/file/path").
 	 * @return A {@link DataSet} that represents the data read from the given file as text lines.
@@ -702,7 +760,7 @@ public abstract class ExecutionEnvironment {
 		catch (Exception e) {
 			throw new RuntimeException("Could not create TypeInformation for type " + data[0].getClass().getName()
 					+ "; please specify the TypeInformation manually via "
-					+ "ExecutionEnvironment#fromElements(Collection, TypeInformation)");
+					+ "ExecutionEnvironment#fromElements(Collection, TypeInformation)", e);
 		}
 
 		return fromCollection(Arrays.asList(data), typeInfo, Utils.getCallLocationName());
@@ -735,7 +793,7 @@ public abstract class ExecutionEnvironment {
 		catch (Exception e) {
 			throw new RuntimeException("Could not create TypeInformation for type " + type.getName()
 					+ "; please specify the TypeInformation manually via "
-					+ "ExecutionEnvironment#fromElements(Collection, TypeInformation)");
+					+ "ExecutionEnvironment#fromElements(Collection, TypeInformation)", e);
 		}
 
 		return fromCollection(Arrays.asList(data), typeInfo, Utils.getCallLocationName());
@@ -827,23 +885,127 @@ public abstract class ExecutionEnvironment {
 	 * @return The result of the job execution, containing elapsed time and accumulators.
 	 * @throws Exception Thrown, if the program executions fails.
 	 */
-	public abstract JobExecutionResult execute(String jobName) throws Exception;
+	public JobExecutionResult execute(String jobName) throws Exception {
+		final JobClient jobClient = executeAsync(jobName);
+
+		try {
+			if (configuration.getBoolean(DeploymentOptions.ATTACHED)) {
+				lastJobExecutionResult = jobClient.getJobExecutionResult().get();
+			} else {
+				lastJobExecutionResult = new DetachedJobExecutionResult(jobClient.getJobID());
+			}
+
+			jobListeners.forEach(
+					jobListener -> jobListener.onJobExecuted(lastJobExecutionResult, null));
+
+		} catch (Throwable t) {
+			// get() on the JobExecutionResult Future will throw an ExecutionException. This
+			// behaviour was largely not there in Flink versions before the PipelineExecutor
+			// refactoring so we should strip that exception.
+			Throwable strippedException = ExceptionUtils.stripExecutionException(t);
+
+			jobListeners.forEach(jobListener -> {
+				jobListener.onJobExecuted(null, strippedException);
+			});
+			ExceptionUtils.rethrowException(strippedException);
+		}
+
+		return lastJobExecutionResult;
+	}
+
+	/**
+	 * Register a {@link JobListener} in this environment. The {@link JobListener} will be
+	 * notified on specific job status changed.
+	 */
+	@PublicEvolving
+	public void registerJobListener(JobListener jobListener) {
+		checkNotNull(jobListener, "JobListener cannot be null");
+		jobListeners.add(jobListener);
+	}
+
+	/**
+	 * Clear all registered {@link JobListener}s.
+	 */
+	@PublicEvolving
+	public void clearJobListeners() {
+		this.jobListeners.clear();
+	}
+
+	/**
+	 * Triggers the program execution asynchronously. The environment will execute all parts of the program that have
+	 * resulted in a "sink" operation. Sink operations are for example printing results ({@link DataSet#print()},
+	 * writing results (e.g. {@link DataSet#writeAsText(String)},
+	 * {@link DataSet#write(org.apache.flink.api.common.io.FileOutputFormat, String)}, or other generic
+	 * data sinks created with {@link DataSet#output(org.apache.flink.api.common.io.OutputFormat)}.
+	 *
+	 * <p>The program execution will be logged and displayed with a generated default name.
+	 *
+	 * @return A {@link JobClient} that can be used to communicate with the submitted job, completed on submission succeeded.
+	 * @throws Exception Thrown, if the program submission fails.
+	 */
+	@PublicEvolving
+	public final JobClient executeAsync() throws Exception {
+		return executeAsync(getDefaultName());
+	}
+
+	/**
+	 * Triggers the program execution asynchronously. The environment will execute all parts of the program that have
+	 * resulted in a "sink" operation. Sink operations are for example printing results ({@link DataSet#print()},
+	 * writing results (e.g. {@link DataSet#writeAsText(String)},
+	 * {@link DataSet#write(org.apache.flink.api.common.io.FileOutputFormat, String)}, or other generic
+	 * data sinks created with {@link DataSet#output(org.apache.flink.api.common.io.OutputFormat)}.
+	 *
+	 * <p>The program execution will be logged and displayed with the given job name.
+	 *
+	 * @return A {@link JobClient} that can be used to communicate with the submitted job, completed on submission succeeded.
+	 * @throws Exception Thrown, if the program submission fails.
+	 */
+	@PublicEvolving
+	public JobClient executeAsync(String jobName) throws Exception {
+		checkNotNull(configuration.get(DeploymentOptions.TARGET), "No execution.target specified in your configuration file.");
+
+		final Plan plan = createProgramPlan(jobName);
+		final PipelineExecutorFactory executorFactory =
+			executorServiceLoader.getExecutorFactory(configuration);
+
+		checkNotNull(
+			executorFactory,
+			"Cannot find compatible factory for specified execution.target (=%s)",
+			configuration.get(DeploymentOptions.TARGET));
+
+		CompletableFuture<JobClient> jobClientFuture = executorFactory
+			.getExecutor(configuration)
+			.execute(plan, configuration, userClassloader);
+
+		try {
+			JobClient jobClient = jobClientFuture.get();
+			jobListeners.forEach(jobListener -> jobListener.onJobSubmitted(jobClient, null));
+			return jobClient;
+		} catch (Throwable t) {
+			jobListeners.forEach(jobListener -> jobListener.onJobSubmitted(null, t));
+			ExceptionUtils.rethrow(t);
+
+			// make javac happy, this code path will not be reached
+			return null;
+		}
+	}
 
 	/**
 	 * Creates the plan with which the system will execute the program, and returns it as
 	 * a String using a JSON representation of the execution data flow graph.
-	 * Note that this needs to be called, before the plan is executed.
 	 *
 	 * @return The execution plan of the program, as a JSON String.
-	 * @throws Exception Thrown, if the compiler could not be instantiated, or the master could not
-	 *                   be contacted to retrieve information relevant to the execution planning.
+	 * @throws Exception Thrown, if the compiler could not be instantiated.
 	 */
-	public abstract String getExecutionPlan() throws Exception;
+	public String getExecutionPlan() throws Exception {
+		Plan p = createProgramPlan(getDefaultName(), false);
+		return ExecutionPlanUtil.getExecutionPlanAsJSON(p);
+	}
 
 	/**
 	 * Registers a file at the distributed cache under the given name. The file will be accessible
 	 * from any user-defined function in the (distributed) runtime under a local path. Files
-	 * may be local files (as long as all relevant workers have access to it), or files in a distributed file system.
+	 * may be local files (which will be distributed via BlobServer), or files in a distributed file system.
 	 * The runtime will copy the files temporarily to a local cache, if needed.
 	 *
 	 * <p>The {@link org.apache.flink.api.common.functions.RuntimeContext} can be obtained inside UDFs via
@@ -861,7 +1023,7 @@ public abstract class ExecutionEnvironment {
 	/**
 	 * Registers a file at the distributed cache under the given name. The file will be accessible
 	 * from any user-defined function in the (distributed) runtime under a local path. Files
-	 * may be local files (as long as all relevant workers have access to it), or files in a distributed file system.
+	 * may be local files (which will be distributed via BlobServer), or files in a distributed file system.
 	 * The runtime will copy the files temporarily to a local cache, if needed.
 	 *
 	 * <p>The {@link org.apache.flink.api.common.functions.RuntimeContext} can be obtained inside UDFs via
@@ -878,22 +1040,9 @@ public abstract class ExecutionEnvironment {
 	}
 
 	/**
-	 * Registers all files that were registered at this execution environment's cache registry of the
-	 * given plan's cache registry.
-	 *
-	 * @param p The plan to register files at.
-	 * @throws IOException Thrown if checks for existence and sanity fail.
-	 */
-	protected void registerCachedFilesWithPlan(Plan p) throws IOException {
-		for (Tuple2<String, DistributedCacheEntry> entry : cacheFile) {
-			p.registerCachedFile(entry.f0, entry.f1);
-		}
-	}
-
-	/**
 	 * Creates the program's {@link Plan}. The plan is a description of all data sources, data sinks,
-	 * and operations and how they interact, as an isolated unit that can be executed with a
-	 * {@link org.apache.flink.api.common.PlanExecutor}. Obtaining a plan and starting it with an
+	 * and operations and how they interact, as an isolated unit that can be executed with an
+	 * {@link PipelineExecutor}. Obtaining a plan and starting it with an
 	 * executor is an alternative way to run a program and is only possible if the program consists
 	 * only of distributed operations.
 	 * This automatically starts a new stage of execution.
@@ -902,13 +1051,13 @@ public abstract class ExecutionEnvironment {
 	 */
 	@Internal
 	public Plan createProgramPlan() {
-		return createProgramPlan(null);
+		return createProgramPlan(getDefaultName());
 	}
 
 	/**
 	 * Creates the program's {@link Plan}. The plan is a description of all data sources, data sinks,
-	 * and operations and how they interact, as an isolated unit that can be executed with a
-	 * {@link org.apache.flink.api.common.PlanExecutor}. Obtaining a plan and starting it with an
+	 * and operations and how they interact, as an isolated unit that can be executed with an
+	 * {@link PipelineExecutor}. Obtaining a plan and starting it with an
 	 * executor is an alternative way to run a program and is only possible if the program consists
 	 * only of distributed operations.
 	 * This automatically starts a new stage of execution.
@@ -923,8 +1072,8 @@ public abstract class ExecutionEnvironment {
 
 	/**
 	 * Creates the program's {@link Plan}. The plan is a description of all data sources, data sinks,
-	 * and operations and how they interact, as an isolated unit that can be executed with a
-	 * {@link org.apache.flink.api.common.PlanExecutor}. Obtaining a plan and starting it with an
+	 * and operations and how they interact, as an isolated unit that can be executed with an
+	 * {@link PipelineExecutor}. Obtaining a plan and starting it with an
 	 * executor is an alternative way to run a program and is only possible if the program consists
 	 * only of distributed operations.
 	 *
@@ -934,6 +1083,8 @@ public abstract class ExecutionEnvironment {
 	 */
 	@Internal
 	public Plan createProgramPlan(String jobName, boolean clearSinks) {
+		checkNotNull(jobName);
+
 		if (this.sinks.isEmpty()) {
 			if (wasExecuted) {
 				throw new RuntimeException("No new data sinks have been defined since the " +
@@ -946,77 +1097,14 @@ public abstract class ExecutionEnvironment {
 			}
 		}
 
-		if (jobName == null) {
-			jobName = getDefaultName();
-		}
-
-		OperatorTranslation translator = new OperatorTranslation();
-		Plan plan = translator.translateToPlan(this.sinks, jobName);
-
-		if (getParallelism() > 0) {
-			plan.setDefaultParallelism(getParallelism());
-		}
-		plan.setExecutionConfig(getConfig());
-
-		// Check plan for GenericTypeInfo's and register the types at the serializers.
-		if (!config.isAutoTypeRegistrationDisabled()) {
-			plan.accept(new Visitor<org.apache.flink.api.common.operators.Operator<?>>() {
-
-				private final HashSet<Class<?>> deduplicator = new HashSet<>();
-
-				@Override
-				public boolean preVisit(org.apache.flink.api.common.operators.Operator<?> visitable) {
-					OperatorInformation<?> opInfo = visitable.getOperatorInfo();
-					Serializers.recursivelyRegisterType(opInfo.getOutputType(), config, deduplicator);
-					return true;
-				}
-
-				@Override
-				public void postVisit(org.apache.flink.api.common.operators.Operator<?> visitable) {}
-			});
-		}
-
-		try {
-			registerCachedFilesWithPlan(plan);
-		} catch (Exception e) {
-			throw new RuntimeException("Error while registering cached files: " + e.getMessage(), e);
-		}
+		final PlanGenerator generator = new PlanGenerator(
+				sinks, config, getParallelism(), cacheFile, jobName);
+		final Plan plan = generator.generate();
 
 		// clear all the sinks such that the next execution does not redo everything
 		if (clearSinks) {
 			this.sinks.clear();
 			wasExecuted = true;
-		}
-
-		// All types are registered now. Print information.
-		int registeredTypes = config.getRegisteredKryoTypes().size() +
-				config.getRegisteredPojoTypes().size() +
-				config.getRegisteredTypesWithKryoSerializerClasses().size() +
-				config.getRegisteredTypesWithKryoSerializers().size();
-		int defaultKryoSerializers = config.getDefaultKryoSerializers().size() +
-				config.getDefaultKryoSerializerClasses().size();
-		LOG.info("The job has {} registered types and {} default Kryo serializers", registeredTypes, defaultKryoSerializers);
-
-		if (config.isForceKryoEnabled() && config.isForceAvroEnabled()) {
-			LOG.warn("In the ExecutionConfig, both Avro and Kryo are enforced. Using Kryo serializer");
-		}
-		if (config.isForceKryoEnabled()) {
-			LOG.info("Using KryoSerializer for serializing POJOs");
-		}
-		if (config.isForceAvroEnabled()) {
-			LOG.info("Using AvroSerializer for serializing POJOs");
-		}
-
-		if (LOG.isDebugEnabled()) {
-			LOG.debug("Registered Kryo types: {}", config.getRegisteredKryoTypes().toString());
-			LOG.debug("Registered Kryo with Serializers types: {}", config.getRegisteredTypesWithKryoSerializers().entrySet().toString());
-			LOG.debug("Registered Kryo with Serializer Classes types: {}", config.getRegisteredTypesWithKryoSerializerClasses().entrySet().toString());
-			LOG.debug("Registered Kryo default Serializers: {}", config.getDefaultKryoSerializers().entrySet().toString());
-			LOG.debug("Registered Kryo default Serializers Classes {}", config.getDefaultKryoSerializerClasses().entrySet().toString());
-			LOG.debug("Registered POJO types: {}", config.getRegisteredPojoTypes().toString());
-
-			// print information about static code analysis
-			LOG.debug("Static code analysis mode: {}", config.getCodeAnalysisMode());
 		}
 
 		return plan;
@@ -1055,8 +1143,9 @@ public abstract class ExecutionEnvironment {
 	 * @return The execution environment of the context in which the program is executed.
 	 */
 	public static ExecutionEnvironment getExecutionEnvironment() {
-		return contextEnvironmentFactory == null ?
-				createLocalEnvironment() : contextEnvironmentFactory.createExecutionEnvironment();
+		return Utils.resolveFactory(threadLocalContextEnvironmentFactory, contextEnvironmentFactory)
+			.map(ExecutionEnvironmentFactory::createExecutionEnvironment)
+			.orElseGet(ExecutionEnvironment::createLocalEnvironment);
 	}
 
 	/**
@@ -1116,14 +1205,17 @@ public abstract class ExecutionEnvironment {
 	 * the same JVM as the environment was created in. It will use the parallelism specified in the
 	 * parameter.
 	 *
-	 * <p>If the configuration key 'jobmanager.web.port' was set in the configuration, that particular
+	 * <p>If the configuration key 'rest.port' was set in the configuration, that particular
 	 * port will be used for the web UI. Otherwise, the default port (8081) will be used.
 	 */
 	@PublicEvolving
 	public static ExecutionEnvironment createLocalEnvironmentWithWebUI(Configuration conf) {
 		checkNotNull(conf, "conf");
 
-		conf.setBoolean(ConfigConstants.LOCAL_START_WEBSERVER, true);
+		if (!conf.contains(RestOptions.PORT)) {
+			// explicitly set this option so that it's not set to 0 later
+			conf.setInteger(RestOptions.PORT, RestOptions.PORT.defaultValue());
+		}
 
 		return createLocalEnvironment(conf, -1);
 	}
@@ -1242,6 +1334,7 @@ public abstract class ExecutionEnvironment {
 	 */
 	protected static void initializeContextEnvironment(ExecutionEnvironmentFactory ctx) {
 		contextEnvironmentFactory = Preconditions.checkNotNull(ctx);
+		threadLocalContextEnvironmentFactory.set(contextEnvironmentFactory);
 	}
 
 	/**
@@ -1251,6 +1344,7 @@ public abstract class ExecutionEnvironment {
 	 */
 	protected static void resetContextEnvironment() {
 		contextEnvironmentFactory = null;
+		threadLocalContextEnvironmentFactory.remove();
 	}
 
 	/**
@@ -1262,6 +1356,6 @@ public abstract class ExecutionEnvironment {
 	 */
 	@Internal
 	public static boolean areExplicitEnvironmentsAllowed() {
-		return contextEnvironmentFactory == null;
+		return contextEnvironmentFactory == null && threadLocalContextEnvironmentFactory.get() == null;
 	}
 }

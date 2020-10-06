@@ -21,12 +21,15 @@ package org.apache.flink.runtime.jobmaster;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.accumulators.AccumulatorHelper;
+import org.apache.flink.runtime.client.JobCancellationException;
+import org.apache.flink.runtime.client.JobExecutionException;
+import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.dispatcher.Dispatcher;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ErrorInfo;
-import org.apache.flink.runtime.jobgraph.JobStatus;
-import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.OptionalFailure;
 import org.apache.flink.util.SerializedThrowable;
 import org.apache.flink.util.SerializedValue;
 
@@ -40,6 +43,7 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 import static org.apache.flink.util.Preconditions.checkArgument;
+import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * Similar to {@link org.apache.flink.api.common.JobExecutionResult} but with an optional
@@ -53,7 +57,9 @@ public class JobResult implements Serializable {
 
 	private final JobID jobId;
 
-	private final Map<String, SerializedValue<Object>> accumulatorResults;
+	private final ApplicationStatus applicationStatus;
+
+	private final Map<String, SerializedValue<OptionalFailure<Object>>> accumulatorResults;
 
 	private final long netRuntime;
 
@@ -63,13 +69,15 @@ public class JobResult implements Serializable {
 
 	private JobResult(
 			final JobID jobId,
-			final Map<String, SerializedValue<Object>> accumulatorResults,
+			final ApplicationStatus applicationStatus,
+			final Map<String, SerializedValue<OptionalFailure<Object>>> accumulatorResults,
 			final long netRuntime,
 			@Nullable final SerializedThrowable serializedThrowable) {
 
 		checkArgument(netRuntime >= 0, "netRuntime must be greater than or equals 0");
 
 		this.jobId = requireNonNull(jobId);
+		this.applicationStatus = requireNonNull(applicationStatus);
 		this.accumulatorResults = requireNonNull(accumulatorResults);
 		this.netRuntime = netRuntime;
 		this.serializedThrowable = serializedThrowable;
@@ -79,14 +87,18 @@ public class JobResult implements Serializable {
 	 * Returns {@code true} if the job finished successfully.
 	 */
 	public boolean isSuccess() {
-		return serializedThrowable == null;
+		return applicationStatus == ApplicationStatus.SUCCEEDED || (applicationStatus == ApplicationStatus.UNKNOWN && serializedThrowable == null);
 	}
 
 	public JobID getJobId() {
 		return jobId;
 	}
 
-	public Map<String, SerializedValue<Object>> getAccumulatorResults() {
+	public ApplicationStatus getApplicationStatus() {
+		return applicationStatus;
+	}
+
+	public Map<String, SerializedValue<OptionalFailure<Object>>> getAccumulatorResults() {
 		return accumulatorResults;
 	}
 
@@ -107,22 +119,40 @@ public class JobResult implements Serializable {
 	 *
 	 * @param classLoader to use for deserialization
 	 * @return JobExecutionResult
-	 * @throws WrappedJobException if the JobResult contains a serialized exception
+	 * @throws JobCancellationException if the job was cancelled
+	 * @throws JobExecutionException if the job execution did not succeed
 	 * @throws IOException if the accumulator could not be deserialized
 	 * @throws ClassNotFoundException if the accumulator could not deserialized
 	 */
-	public JobExecutionResult toJobExecutionResult(ClassLoader classLoader) throws WrappedJobException, IOException, ClassNotFoundException {
-		if (serializedThrowable != null) {
-			final Throwable throwable = serializedThrowable.deserializeError(classLoader);
-			throw new WrappedJobException(throwable);
-		}
+	public JobExecutionResult toJobExecutionResult(ClassLoader classLoader) throws JobExecutionException, IOException, ClassNotFoundException {
+		if (applicationStatus == ApplicationStatus.SUCCEEDED) {
+			return new JobExecutionResult(
+				jobId,
+				netRuntime,
+				AccumulatorHelper.deserializeAccumulators(
+					accumulatorResults,
+					classLoader));
+		} else {
+			final Throwable cause;
 
-		return new JobExecutionResult(
-			jobId,
-			netRuntime,
-			AccumulatorHelper.deserializeAccumulators(
-				accumulatorResults,
-				classLoader));
+			if (serializedThrowable == null) {
+				cause = null;
+			} else {
+				cause = serializedThrowable.deserializeError(classLoader);
+			}
+
+			final JobExecutionException exception;
+
+			if (applicationStatus == ApplicationStatus.FAILED) {
+				exception = new JobExecutionException(jobId, "Job execution failed.", cause);
+			} else if (applicationStatus == ApplicationStatus.CANCELED) {
+				exception = new JobCancellationException(jobId, "Job was cancelled.", cause);
+			} else {
+				exception = new JobExecutionException(jobId, "Job completed with illegal application status: " + applicationStatus + '.', cause);
+			}
+
+			throw exception;
+		}
 	}
 
 	/**
@@ -133,7 +163,9 @@ public class JobResult implements Serializable {
 
 		private JobID jobId;
 
-		private Map<String, SerializedValue<Object>> accumulatorResults;
+		private ApplicationStatus applicationStatus = ApplicationStatus.UNKNOWN;
+
+		private Map<String, SerializedValue<OptionalFailure<Object>>> accumulatorResults;
 
 		private long netRuntime = -1;
 
@@ -144,7 +176,12 @@ public class JobResult implements Serializable {
 			return this;
 		}
 
-		public Builder accumulatorResults(final Map<String, SerializedValue<Object>> accumulatorResults) {
+		public Builder applicationStatus(final ApplicationStatus applicationStatus) {
+			this.applicationStatus = applicationStatus;
+			return this;
+		}
+
+		public Builder accumulatorResults(final Map<String, SerializedValue<OptionalFailure<Object>>> accumulatorResults) {
 			this.accumulatorResults = accumulatorResults;
 			return this;
 		}
@@ -162,6 +199,7 @@ public class JobResult implements Serializable {
 		public JobResult build() {
 			return new JobResult(
 				jobId,
+				applicationStatus,
 				accumulatorResults == null ? Collections.emptyMap() : accumulatorResults,
 				netRuntime,
 				serializedThrowable);
@@ -187,31 +225,21 @@ public class JobResult implements Serializable {
 		final JobResult.Builder builder = new JobResult.Builder();
 		builder.jobId(jobId);
 
-		final long netRuntime = accessExecutionGraph.getStatusTimestamp(jobStatus) - accessExecutionGraph.getStatusTimestamp(JobStatus.CREATED);
-		builder.netRuntime(netRuntime);
+		builder.applicationStatus(ApplicationStatus.fromJobStatus(accessExecutionGraph.getState()));
+
+		final long netRuntime = accessExecutionGraph.getStatusTimestamp(jobStatus) - accessExecutionGraph.getStatusTimestamp(JobStatus.INITIALIZING);
+		// guard against clock changes
+		final long guardedNetRuntime = Math.max(netRuntime, 0L);
+		builder.netRuntime(guardedNetRuntime);
 		builder.accumulatorResults(accessExecutionGraph.getAccumulatorsSerialized());
 
-		if (jobStatus != JobStatus.FINISHED) {
+		if (jobStatus == JobStatus.FAILED) {
 			final ErrorInfo errorInfo = accessExecutionGraph.getFailureInfo();
+			checkNotNull(errorInfo, "No root cause is found for the job failure.");
 
-			if (errorInfo != null) {
-				builder.serializedThrowable(errorInfo.getException());
-			}
+			builder.serializedThrowable(errorInfo.getException());
 		}
 
 		return builder.build();
 	}
-
-	/**
-	 * Exception which indicates that the job has finished with an {@link Exception}.
-	 */
-	public static final class WrappedJobException extends FlinkException {
-
-		private static final long serialVersionUID = 6535061898650156019L;
-
-		public WrappedJobException(Throwable cause) {
-			super(cause);
-		}
-	}
-
 }

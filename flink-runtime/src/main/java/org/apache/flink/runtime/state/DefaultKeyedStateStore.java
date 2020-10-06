@@ -22,8 +22,6 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.AggregatingState;
 import org.apache.flink.api.common.state.AggregatingStateDescriptor;
-import org.apache.flink.api.common.state.FoldingState;
-import org.apache.flink.api.common.state.FoldingStateDescriptor;
 import org.apache.flink.api.common.state.KeyedStateStore;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -44,8 +42,8 @@ import static java.util.Objects.requireNonNull;
  */
 public class DefaultKeyedStateStore implements KeyedStateStore {
 
-	private final KeyedStateBackend<?> keyedStateBackend;
-	private final ExecutionConfig executionConfig;
+	protected final KeyedStateBackend<?> keyedStateBackend;
+	protected final ExecutionConfig executionConfig;
 
 	public DefaultKeyedStateStore(KeyedStateBackend<?> keyedStateBackend, ExecutionConfig executionConfig) {
 		this.keyedStateBackend = Preconditions.checkNotNull(keyedStateBackend);
@@ -98,17 +96,6 @@ public class DefaultKeyedStateStore implements KeyedStateStore {
 	}
 
 	@Override
-	public <T, ACC> FoldingState<T, ACC> getFoldingState(FoldingStateDescriptor<T, ACC> stateProperties) {
-		requireNonNull(stateProperties, "The state properties must not be null");
-		try {
-			stateProperties.initializeSerializerUnlessSet(executionConfig);
-			return getPartitionedState(stateProperties);
-		} catch (Exception e) {
-			throw new RuntimeException("Error while getting state", e);
-		}
-	}
-
-	@Override
 	public <UK, UV> MapState<UK, UV> getMapState(MapStateDescriptor<UK, UV> stateProperties) {
 		requireNonNull(stateProperties, "The state properties must not be null");
 		try {
@@ -120,7 +107,7 @@ public class DefaultKeyedStateStore implements KeyedStateStore {
 		}
 	}
 
-	private <S extends State> S getPartitionedState(StateDescriptor<S, ?> stateDescriptor) throws Exception {
+	protected  <S extends State> S getPartitionedState(StateDescriptor<S, ?> stateDescriptor) throws Exception {
 		return keyedStateBackend.getPartitionedState(
 				VoidNamespace.INSTANCE,
 				VoidNamespaceSerializer.INSTANCE,

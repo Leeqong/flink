@@ -28,8 +28,11 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.Random;
+import java.util.stream.Collectors;
 
+import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
@@ -37,6 +40,12 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  */
 @PublicEvolving
 public final class StringUtils {
+
+	/**
+	 * An empty string array. There are just too many places where one needs an empty string array
+	 * and wants to save some object allocation.
+	 */
+	public static final String[] EMPTY_STRING_ARRAY = new String[0];
 
 	private static final char[] HEX_CHARS = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };
 
@@ -98,71 +107,14 @@ public final class StringUtils {
 	}
 
 	/**
-	 * This method calls {@link Object#toString()} on the given object, unless the
-	 * object is an array. In that case, it will use the {@link #arrayToString(Object)}
-	 * method to create a string representation of the array that includes all contained
-	 * elements.
+	 * Converts the given object into a string representation by calling {@link Object#toString()}
+	 * and formatting (possibly nested) arrays and {@code null}.
 	 *
-	 * @param o The object for which to create the string representation.
-	 * @return The string representation of the object.
+	 * <p>See {@link Arrays#deepToString(Object[])} for more information about the used format.
 	 */
 	public static String arrayAwareToString(Object o) {
-		if (o == null) {
-			return "null";
-		}
-		if (o.getClass().isArray()) {
-			return arrayToString(o);
-		}
-
-		return o.toString();
-	}
-
-	/**
-	 * Returns a string representation of the given array. This method takes an Object
-	 * to allow also all types of primitive type arrays.
-	 *
-	 * @param array The array to create a string representation for.
-	 * @return The string representation of the array.
-	 * @throws IllegalArgumentException If the given object is no array.
-	 */
-	public static String arrayToString(Object array) {
-		if (array == null) {
-			throw new NullPointerException();
-		}
-
-		if (array instanceof int[]) {
-			return Arrays.toString((int[]) array);
-		}
-		if (array instanceof long[]) {
-			return Arrays.toString((long[]) array);
-		}
-		if (array instanceof Object[]) {
-			return Arrays.toString((Object[]) array);
-		}
-		if (array instanceof byte[]) {
-			return Arrays.toString((byte[]) array);
-		}
-		if (array instanceof double[]) {
-			return Arrays.toString((double[]) array);
-		}
-		if (array instanceof float[]) {
-			return Arrays.toString((float[]) array);
-		}
-		if (array instanceof boolean[]) {
-			return Arrays.toString((boolean[]) array);
-		}
-		if (array instanceof char[]) {
-			return Arrays.toString((char[]) array);
-		}
-		if (array instanceof short[]) {
-			return Arrays.toString((short[]) array);
-		}
-
-		if (array.getClass().isArray()) {
-			return "<unknown array type>";
-		} else {
-			throw new IllegalArgumentException("The given argument is no array.");
-		}
+		final String arrayString = Arrays.deepToString(new Object[]{o});
+		return arrayString.substring(1, arrayString.length() - 1);
 	}
 
 	/**
@@ -244,6 +196,38 @@ public final class StringUtils {
 			data[i] = (char) (rnd.nextInt(diff) + minValue);
 		}
 		return new String(data);
+	}
+
+	/**
+	 * Creates a random alphanumeric string of given length.
+	 *
+	 * @param rnd The random number generator to use.
+	 * @param length The number of alphanumeric characters to append.
+	 */
+	public static String generateRandomAlphanumericString(Random rnd, int length) {
+		checkNotNull(rnd);
+		checkArgument(length >= 0);
+
+		StringBuilder buffer = new StringBuilder(length);
+		for (int i = 0; i < length; i++) {
+			buffer.append(nextAlphanumericChar(rnd));
+		}
+		return buffer.toString();
+	}
+
+	private static char nextAlphanumericChar(Random rnd) {
+		int which = rnd.nextInt(62);
+		char c;
+		if (which < 10) {
+			c = (char) ('0' + which);
+		}
+		else if (which < 36) {
+			c = (char) ('A' - 10 + which);
+		}
+		else {
+			c = (char) ('a' - 36 + which);
+		}
+		return c;
 	}
 
 	/**
@@ -346,6 +330,21 @@ public final class StringUtils {
 		else {
 			return s2;
 		}
+	}
+
+	/**
+	 * Generates a string containing a comma-separated list of values in double-quotes.
+	 * Uses lower-cased values returned from {@link Object#toString()} method for each element in the given array.
+	 * Null values are skipped.
+	 *
+	 * @param values array of elements for the list
+	 *
+	 * @return The string with quoted list of elements
+	 */
+	public static String toQuotedListString(Object[] values) {
+		return Arrays.stream(values).filter(Objects::nonNull)
+			.map(v -> v.toString().toLowerCase())
+			.collect(Collectors.joining(", ", "\"", "\""));
 	}
 
 	// ------------------------------------------------------------------------

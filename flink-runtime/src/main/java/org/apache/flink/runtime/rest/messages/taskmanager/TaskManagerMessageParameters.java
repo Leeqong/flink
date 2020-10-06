@@ -31,7 +31,7 @@ import java.util.Collections;
  */
 public class TaskManagerMessageParameters extends MessageParameters {
 
-	private TaskManagerIdPathParameter taskManagerIdParameter = new TaskManagerIdPathParameter();
+	public final TaskManagerIdPathParameter taskManagerIdParameter = new TaskManagerIdPathParameter();
 
 	@Override
 	public Collection<MessagePathParameter<?>> getPathParameters() {

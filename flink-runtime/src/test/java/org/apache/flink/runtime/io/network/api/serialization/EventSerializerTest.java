@@ -19,15 +19,14 @@
 package org.apache.flink.runtime.io.network.api.serialization;
 
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.CheckpointType;
 import org.apache.flink.runtime.event.AbstractEvent;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.CheckpointBarrier;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
 import org.apache.flink.runtime.io.network.api.EndOfSuperstepEvent;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
+import org.apache.flink.runtime.io.network.buffer.BufferConsumer;
 import org.apache.flink.runtime.io.network.util.TestTaskEvent;
-import org.apache.flink.runtime.state.CheckpointStorageLocationReference;
 
 import org.junit.Test;
 
@@ -46,45 +45,16 @@ import static org.junit.Assert.fail;
  */
 public class EventSerializerTest {
 
-	@Test
-	public void testCheckpointBarrierSerialization() throws Exception {
-		long id = Integer.MAX_VALUE + 123123L;
-		long timestamp = Integer.MAX_VALUE + 1228L;
-
-		CheckpointOptions checkpoint = CheckpointOptions.forCheckpointWithDefaultLocation();
-		testCheckpointBarrierSerialization(id, timestamp, checkpoint);
-
-		final byte[] reference = new byte[] { 15, 52, 52, 11, 0, 0, 0, 0, -1, -23, -19, 35 };
-
-		CheckpointOptions savepoint = new CheckpointOptions(
-				CheckpointType.SAVEPOINT, new CheckpointStorageLocationReference(reference));
-		testCheckpointBarrierSerialization(id, timestamp, savepoint);
-	}
-
-	private void testCheckpointBarrierSerialization(long id, long timestamp, CheckpointOptions options) throws IOException {
-		ClassLoader cl = Thread.currentThread().getContextClassLoader();
-
-		CheckpointBarrier barrier = new CheckpointBarrier(id, timestamp, options);
-		ByteBuffer serialized = EventSerializer.toSerializedEvent(barrier);
-		CheckpointBarrier deserialized = (CheckpointBarrier) EventSerializer.fromSerializedEvent(serialized, cl);
-		assertFalse(serialized.hasRemaining());
-
-		assertEquals(id, deserialized.getId());
-		assertEquals(timestamp, deserialized.getTimestamp());
-		assertEquals(options.getCheckpointType(), deserialized.getCheckpointOptions().getCheckpointType());
-		assertEquals(options.getTargetLocation(), deserialized.getCheckpointOptions().getTargetLocation());
-	}
+	private final AbstractEvent[] events = {
+		EndOfPartitionEvent.INSTANCE,
+		EndOfSuperstepEvent.INSTANCE,
+		new CheckpointBarrier(1678L, 4623784L, CheckpointOptions.forCheckpointWithDefaultLocation()),
+		new TestTaskEvent(Math.random(), 12361231273L),
+		new CancelCheckpointMarker(287087987329842L)
+	};
 
 	@Test
 	public void testSerializeDeserializeEvent() throws Exception {
-		AbstractEvent[] events = {
-				EndOfPartitionEvent.INSTANCE,
-				EndOfSuperstepEvent.INSTANCE,
-				new CheckpointBarrier(1678L, 4623784L, CheckpointOptions.forCheckpointWithDefaultLocation()),
-				new TestTaskEvent(Math.random(), 12361231273L),
-				new CancelCheckpointMarker(287087987329842L)
-		};
-
 		for (AbstractEvent evt : events) {
 			ByteBuffer serializedEvent = EventSerializer.toSerializedEvent(evt);
 			assertTrue(serializedEvent.hasRemaining());
@@ -96,6 +66,41 @@ public class EventSerializerTest {
 		}
 	}
 
+	@Test
+	public void testToBufferConsumer() throws IOException {
+		for (AbstractEvent evt : events) {
+			BufferConsumer bufferConsumer = EventSerializer.toBufferConsumer(evt, false);
+
+			assertFalse(bufferConsumer.isBuffer());
+			assertTrue(bufferConsumer.isFinished());
+			assertTrue(bufferConsumer.isDataAvailable());
+			assertFalse(bufferConsumer.isRecycled());
+
+			if (evt instanceof CheckpointBarrier) {
+				assertTrue(bufferConsumer.build().getDataType().isBlockingUpstream());
+			} else {
+				assertEquals(Buffer.DataType.EVENT_BUFFER, bufferConsumer.build().getDataType());
+			}
+		}
+	}
+
+	@Test
+	public void testToBuffer() throws IOException {
+		for (AbstractEvent evt : events) {
+			Buffer buffer = EventSerializer.toBuffer(evt, false);
+
+			assertFalse(buffer.isBuffer());
+			assertTrue(buffer.readableBytes() > 0);
+			assertFalse(buffer.isRecycled());
+
+			if (evt instanceof CheckpointBarrier) {
+				assertTrue(buffer.getDataType().isBlockingUpstream());
+			} else {
+				assertEquals(Buffer.DataType.EVENT_BUFFER, buffer.getDataType());
+			}
+		}
+	}
+
 	/**
 	 * Tests {@link EventSerializer#isEvent(Buffer, Class)}
 	 * whether it peaks into the buffer only, i.e. after the call, the buffer
@@ -103,8 +108,7 @@ public class EventSerializerTest {
 	 */
 	@Test
 	public void testIsEventPeakOnly() throws Exception {
-		final Buffer serializedEvent =
-			EventSerializer.toBuffer(EndOfPartitionEvent.INSTANCE);
+		final Buffer serializedEvent = EventSerializer.toBuffer(EndOfPartitionEvent.INSTANCE, false);
 		try {
 			final ClassLoader cl = getClass().getClassLoader();
 			assertTrue(
@@ -123,14 +127,6 @@ public class EventSerializerTest {
 	 */
 	@Test
 	public void testIsEvent() throws Exception {
-		AbstractEvent[] events = {
-			EndOfPartitionEvent.INSTANCE,
-			EndOfSuperstepEvent.INSTANCE,
-			new CheckpointBarrier(1678L, 4623784L, CheckpointOptions.forCheckpointWithDefaultLocation()),
-			new TestTaskEvent(Math.random(), 12361231273L),
-			new CancelCheckpointMarker(287087987329842L)
-		};
-
 		Class[] expectedClasses = Arrays.stream(events)
 			.map(AbstractEvent::getClass)
 			.toArray(Class[]::new);
@@ -163,14 +159,21 @@ public class EventSerializerTest {
 	 * @param event the event to encode
 	 * @param eventClass the event class to check against
 	 *
-	 * @return whether {@link EventSerializer#isEvent(ByteBuffer, Class)}
+	 * @return whether {@link EventSerializer#isEvent(Buffer, Class)}
 	 * 		thinks the encoded buffer matches the class
 	 */
 	private boolean checkIsEvent(
 			AbstractEvent event,
 			Class<?> eventClass) throws IOException {
 
-		final Buffer serializedEvent = EventSerializer.toBuffer(event);
+		final boolean unprioritizedIsEvent = isEvent(event, eventClass, false);
+		final boolean prioritizedIsEvent = isEvent(event, eventClass, true);
+		assertEquals(unprioritizedIsEvent, prioritizedIsEvent);
+		return unprioritizedIsEvent;
+	}
+
+	private boolean isEvent(AbstractEvent event, Class<?> eventClass, boolean hasPriority) throws IOException {
+		final Buffer serializedEvent = EventSerializer.toBuffer(event, hasPriority);
 		try {
 			return EventSerializer.isEvent(serializedEvent, eventClass);
 		} finally {

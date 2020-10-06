@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.List;
 import java.util.function.Predicate;
 
 /**
@@ -178,12 +179,25 @@ public class StateObjectCollection<T extends StateObject> implements Collection<
 		return "StateObjectCollection{" + stateObjects + '}';
 	}
 
+	public List<T> asList() {
+		return stateObjects instanceof List ?
+			(List<T>) stateObjects :
+			stateObjects != null ?
+				new ArrayList<>(stateObjects) :
+				Collections.emptyList();
+	}
+
 	// ------------------------------------------------------------------------
 	//  Helper methods.
 	// ------------------------------------------------------------------------
 
+	@SuppressWarnings("unchecked")
 	public static <T extends StateObject> StateObjectCollection<T> empty() {
 		return (StateObjectCollection<T>) EMPTY;
+	}
+
+	public static <T extends StateObject> StateObjectCollection<T> emptyIfNull(StateObjectCollection<T> collection) {
+		return collection == null ? empty() : collection;
 	}
 
 	public static <T extends StateObject> StateObjectCollection<T> singleton(T stateObject) {
