@@ -19,39 +19,47 @@
 package org.apache.flink.runtime.state;
 
 import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.runtime.execution.Environment;
-import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
+import org.apache.flink.runtime.state.metrics.SizeTrackingStateConfig;
 
 import java.io.IOException;
 
 /**
  * An abstract base implementation of the {@link StateBackend} interface.
  *
- * <p>This class has currently no contents and only kept to not break the prior class hierarchy for users.
+ * <p>This class has currently no contents and only kept to not break the prior class hierarchy for
+ * users.
  */
 @PublicEvolving
-public abstract class AbstractStateBackend implements StateBackend, java.io.Serializable {
+public abstract class AbstractStateBackend implements StateBackend {
 
-	private static final long serialVersionUID = 4620415814639230247L;
+    private static final long serialVersionUID = 4620415814639230247L;
 
-	// ------------------------------------------------------------------------
-	//  State Backend - State-Holding Backends
-	// ------------------------------------------------------------------------
+    public static StreamCompressionDecorator getCompressionDecorator(
+            ExecutionConfig executionConfig) {
+        if (executionConfig != null && executionConfig.isUseSnapshotCompression()) {
+            return SnappyStreamCompressionDecorator.INSTANCE;
+        } else {
+            return UncompressedStreamCompressionDecorator.INSTANCE;
+        }
+    }
 
-	@Override
-	public abstract <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
-			Environment env,
-			JobID jobID,
-			String operatorIdentifier,
-			TypeSerializer<K> keySerializer,
-			int numberOfKeyGroups,
-			KeyGroupRange keyGroupRange,
-			TaskKvStateRegistry kvStateRegistry) throws IOException;
+    protected LatencyTrackingStateConfig.Builder latencyTrackingConfigBuilder =
+            LatencyTrackingStateConfig.newBuilder();
 
-	@Override
-	public abstract OperatorStateBackend createOperatorStateBackend(
-			Environment env,
-			String operatorIdentifier) throws Exception;
+    protected SizeTrackingStateConfig.Builder sizeTrackingConfigBuilder =
+            SizeTrackingStateConfig.newBuilder();
+
+    // ------------------------------------------------------------------------
+    //  State Backend - State-Holding Backends
+    // ------------------------------------------------------------------------
+
+    @Override
+    public abstract <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
+            KeyedStateBackendParameters<K> parameters) throws IOException;
+
+    @Override
+    public abstract OperatorStateBackend createOperatorStateBackend(
+            OperatorStateBackendParameters parameters) throws Exception;
 }

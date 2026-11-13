@@ -21,142 +21,127 @@ package org.apache.flink.test.example.client;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.client.deployment.StandaloneClusterId;
-import org.apache.flink.client.program.ClusterClient;
-import org.apache.flink.client.program.StandaloneClusterClient;
+import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.client.JobRetrievalException;
+import org.apache.flink.configuration.RestOptions;
+import org.apache.flink.core.testutils.CheckedThread;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobGraphTestUtils;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
-import org.apache.flink.runtime.minicluster.FlinkMiniCluster;
-import org.apache.flink.runtime.testingUtils.TestingCluster;
-import org.apache.flink.runtime.testingUtils.TestingJobManagerMessages;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.test.junit5.InjectClusterClient;
+import org.apache.flink.test.junit5.MiniClusterExtension;
+import org.apache.flink.util.TestLoggerExtension;
 
-import akka.actor.ActorRef;
-import akka.actor.ActorSystem;
-import akka.testkit.JavaTestKit;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.time.Duration;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicReference;
 
-import scala.collection.Seq;
+import static org.apache.flink.runtime.testutils.CommonTestUtils.waitUntilCondition;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.fail;
+/** Tests retrieval of a job from a running Flink cluster. */
+@ExtendWith(TestLoggerExtension.class)
+class JobRetrievalITCase {
 
-/**
- * Tests retrieval of a job from a running Flink cluster.
- */
-public class JobRetrievalITCase extends TestLogger {
+    private static final Semaphore lock = new Semaphore(1);
 
-	private static final Semaphore lock = new Semaphore(1);
+    @RegisterExtension
+    private static final MiniClusterExtension MINI_CLUSTER_RESOURCE =
+            new MiniClusterExtension(
+                    new MiniClusterResourceConfiguration.Builder()
+                            .setNumberTaskManagers(1)
+                            .setNumberSlotsPerTaskManager(4)
+                            .build());
 
-	private static FlinkMiniCluster cluster;
+    private RestClusterClient<StandaloneClusterId> client;
 
-	@BeforeClass
-	public static void before() {
-		Configuration configuration = new Configuration();
-		cluster = new TestingCluster(configuration, false);
-		cluster.start();
-	}
+    @BeforeEach
+    void setUp(@InjectClusterClient RestClusterClient<?> restClusterClient) throws Exception {
+        final Configuration clientConfig = new Configuration();
+        clientConfig.addAll(restClusterClient.getFlinkConfiguration());
+        clientConfig.set(RestOptions.RETRY_MAX_ATTEMPTS, 0);
+        clientConfig.set(RestOptions.RETRY_DELAY, Duration.ofMillis(0L));
 
-	@AfterClass
-	public static void after() {
-		cluster.stop();
-		cluster = null;
-	}
+        client = new RestClusterClient<>(clientConfig, StandaloneClusterId.getInstance());
+    }
 
-	@Test
-	public void testJobRetrieval() throws Exception {
-		final JobID jobID = new JobID();
+    @AfterEach
+    void tearDown() {
+        if (client != null) {
+            client.close();
+        }
+    }
 
-		final JobVertex imalock = new JobVertex("imalock");
-		imalock.setInvokableClass(SemaphoreInvokable.class);
+    @Test
+    void testJobRetrieval() throws Exception {
+        final JobVertex imalock = new JobVertex("imalock");
+        imalock.setInvokableClass(SemaphoreInvokable.class);
+        imalock.setParallelism(1);
 
-		final JobGraph jobGraph = new JobGraph(jobID, "testjob", imalock);
+        final JobGraph jobGraph = JobGraphTestUtils.streamingJobGraph(imalock);
+        final JobID jobId = jobGraph.getJobID();
 
-		final ClusterClient<StandaloneClusterId> client = new StandaloneClusterClient(cluster.configuration(), cluster.highAvailabilityServices(), true);
+        // acquire the lock to make sure that the job cannot complete until the job client
+        // has been attached in resumingThread
+        lock.acquire();
 
-		// acquire the lock to make sure that the job cannot complete until the job client
-		// has been attached in resumingThread
-		lock.acquire();
-		client.runDetached(jobGraph, JobRetrievalITCase.class.getClassLoader());
-		final AtomicReference<Throwable> error = new AtomicReference<>();
+        client.submitJob(jobGraph).get();
 
-		final Thread resumingThread = new Thread(new Runnable() {
-			@Override
-			public void run() {
-				try {
-					assertNotNull(client.retrieveJob(jobID));
-				} catch (Throwable e) {
-					error.set(e);
-				}
-			}
-		}, "Flink-Job-Retriever");
+        final CheckedThread resumingThread =
+                new CheckedThread("Flink-Job-Retriever") {
+                    @Override
+                    public void go() throws Exception {
+                        assertThat(client.requestJobResult(jobId).get()).isNotNull();
+                    }
+                };
 
-		final Seq<ActorSystem> actorSystemSeq = cluster.jobManagerActorSystems().get();
-		final ActorSystem actorSystem = actorSystemSeq.last();
-		JavaTestKit testkit = new JavaTestKit(actorSystem);
+        // wait until the job is running
+        waitUntilCondition(() -> !client.listJobs().get().isEmpty(), 20);
 
-		final ActorRef jm = cluster.getJobManagersAsJava().get(0);
-		// wait until client connects
-		jm.tell(TestingJobManagerMessages.getNotifyWhenClientConnects(), testkit.getRef());
-		// confirm registration
-		testkit.expectMsgEquals(true);
+        // kick off resuming
+        resumingThread.start();
 
-		// kick off resuming
-		resumingThread.start();
+        // wait for client to connect
+        waitUntilCondition(() -> resumingThread.getState() == Thread.State.WAITING, 20);
 
-		// wait for client to connect
-		testkit.expectMsgAllOf(
-			TestingJobManagerMessages.getClientConnected(),
-			TestingJobManagerMessages.getClassLoadingPropsDelivered());
+        // client has connected, we can release the lock
+        lock.release();
 
-		// client has connected, we can release the lock
-		lock.release();
+        resumingThread.sync();
+    }
 
-		resumingThread.join();
+    @Test
+    void testNonExistingJobRetrieval() {
+        final JobID jobID = new JobID();
 
-		Throwable exception = error.get();
-		if (exception != null) {
-			throw new AssertionError(exception);
-		}
-	}
+        assertThatThrownBy(() -> client.requestJobResult(jobID).get())
+                .hasMessageContaining("Could not find Flink job");
+    }
 
-	@Test
-	public void testNonExistingJobRetrieval() throws Exception {
-		final JobID jobID = new JobID();
-		ClusterClient<StandaloneClusterId> client = new StandaloneClusterClient(cluster.configuration());
+    /**
+     * Invokable that waits on {@link #lock} to be released and finishes afterwards.
+     *
+     * <p>NOTE: needs to be <tt>public</tt> so that a task can be run with this!
+     */
+    public static class SemaphoreInvokable extends AbstractInvokable {
 
-		try {
-			client.retrieveJob(jobID);
-			fail();
-		} catch (JobRetrievalException ignored) {
-			// this is what we want
-		}
-	}
+        public SemaphoreInvokable(Environment environment) {
+            super(environment);
+        }
 
-	/**
-	 * Invokable that waits on {@link #lock} to be released and finishes afterwards.
-	 *
-	 * <p>NOTE: needs to be <tt>public</tt> so that a task can be run with this!
-	 */
-	public static class SemaphoreInvokable extends AbstractInvokable {
-
-		public SemaphoreInvokable(Environment environment) {
-			super(environment);
-		}
-
-		@Override
-		public void invoke() throws Exception {
-			lock.acquire();
-			lock.release();
-		}
-	}
-
+        @Override
+        public void invoke() throws Exception {
+            lock.acquire();
+            lock.release();
+        }
+    }
 }

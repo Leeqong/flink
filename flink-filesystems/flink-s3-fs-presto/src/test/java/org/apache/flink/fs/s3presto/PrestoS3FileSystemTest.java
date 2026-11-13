@@ -20,84 +20,121 @@ package org.apache.flink.fs.s3presto;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.FileSystem;
-import org.apache.flink.runtime.fs.hdfs.HadoopFileSystem;
+import org.apache.flink.fs.s3.common.AbstractS3FileSystemFactory;
+import org.apache.flink.fs.s3.common.FlinkS3FileSystem;
+import org.apache.flink.fs.s3.common.token.DynamicTemporaryAWSCredentialsProvider;
+import org.apache.flink.runtime.util.HadoopConfigLoader;
 
 import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.AWSStaticCredentialsProvider;
 import com.amazonaws.services.s3.AmazonS3Client;
-import com.facebook.presto.hive.PrestoS3FileSystem;
-import org.junit.Test;
+import com.facebook.presto.hive.s3.PrestoS3FileSystem;
+import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.net.URI;
 
-import static org.junit.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Unit tests for the S3 file system support via Presto's PrestoS3FileSystem.
- * These tests do not actually read from or write to S3.
+ * Unit tests for the S3 file system support via Presto's PrestoS3FileSystem. These tests do not
+ * actually read from or write to S3.
  */
-public class PrestoS3FileSystemTest {
+class PrestoS3FileSystemTest {
 
-	@Test
-	public void testConfigPropagation() throws Exception{
-		final Configuration conf = new Configuration();
-		conf.setString("s3.access-key", "test_access_key_id");
-		conf.setString("s3.secret-key", "test_secret_access_key");
+    @Test
+    void testConfigPropagation() throws Exception {
+        final Configuration conf = new Configuration();
 
-		FileSystem.initialize(conf);
+        conf.set(AbstractS3FileSystemFactory.ACCESS_KEY, "test_access_key_id");
+        conf.set(AbstractS3FileSystemFactory.SECRET_KEY, "test_secret_access_key");
 
-		FileSystem fs = FileSystem.get(new URI("s3://test"));
-		validateBasicCredentials(fs);
-	}
+        FileSystem.initialize(conf);
 
-	@Test
-	public void testConfigPropagationWithPrestoPrefix() throws Exception{
-		final Configuration conf = new Configuration();
-		conf.setString("presto.s3.access-key", "test_access_key_id");
-		conf.setString("presto.s3.secret-key", "test_secret_access_key");
+        FileSystem fs = FileSystem.get(new URI("s3://test"));
+        validateBasicCredentials(fs);
+    }
 
-		FileSystem.initialize(conf);
+    @Test
+    void testDynamicConfigProvider() throws Exception {
+        final Configuration conf = new Configuration();
 
-		FileSystem fs = FileSystem.get(new URI("s3://test"));
-		validateBasicCredentials(fs);
-	}
+        conf.setString(
+                "presto.s3.credentials-provider",
+                DynamicTemporaryAWSCredentialsProvider.class.getName());
 
-	@Test
-	public void testConfigPropagationAlternateStyle() throws Exception{
-		final Configuration conf = new Configuration();
-		conf.setString("s3.access.key", "test_access_key_id");
-		conf.setString("s3.secret.key", "test_secret_access_key");
+        FileSystem.initialize(conf);
 
-		FileSystem.initialize(conf);
+        FileSystem fs = FileSystem.get(new URI("s3://test"));
+        assertThat(getAwsCredentialsProvider(getPrestoFileSystem(fs)))
+                .isInstanceOf(DynamicTemporaryAWSCredentialsProvider.class);
+    }
 
-		FileSystem fs = FileSystem.get(new URI("s3://test"));
-		validateBasicCredentials(fs);
-	}
+    @Test
+    void testConfigPropagationWithPrestoPrefix() throws Exception {
+        final Configuration conf = new Configuration();
+        conf.setString("presto.s3.access-key", "test_access_key_id");
+        conf.setString("presto.s3.secret-key", "test_secret_access_key");
 
-	// ------------------------------------------------------------------------
-	//  utilities
-	// ------------------------------------------------------------------------
+        FileSystem.initialize(conf);
 
-	private static void validateBasicCredentials(FileSystem fs) throws Exception {
-		assertTrue(fs instanceof HadoopFileSystem);
+        FileSystem fs = FileSystem.get(new URI("s3://test"));
+        validateBasicCredentials(fs);
+    }
 
-		org.apache.hadoop.fs.FileSystem hadoopFs = ((HadoopFileSystem) fs).getHadoopFileSystem();
-		assertTrue(hadoopFs instanceof PrestoS3FileSystem);
+    @Test
+    void testConfigPropagationAlternateStyle() throws Exception {
+        final Configuration conf = new Configuration();
+        conf.setString("s3.access.key", "test_access_key_id");
+        conf.setString("s3.secret.key", "test_secret_access_key");
 
-		try (PrestoS3FileSystem prestoFs = (PrestoS3FileSystem) hadoopFs) {
-			AWSCredentialsProvider provider = getAwsCredentialsProvider(prestoFs);
-			assertTrue(provider instanceof AWSStaticCredentialsProvider);
-		}
-	}
+        FileSystem.initialize(conf);
 
-	private static AWSCredentialsProvider getAwsCredentialsProvider(PrestoS3FileSystem fs) throws Exception {
-		Field amazonS3field = PrestoS3FileSystem.class.getDeclaredField("s3");
-		amazonS3field.setAccessible(true);
-		AmazonS3Client amazonS3 = (AmazonS3Client) amazonS3field.get(fs);
+        FileSystem fs = FileSystem.get(new URI("s3://test"));
+        validateBasicCredentials(fs);
+    }
 
-		Field providerField = AmazonS3Client.class.getDeclaredField("awsCredentialsProvider");
-		providerField.setAccessible(true);
-		return (AWSCredentialsProvider) providerField.get(amazonS3);
-	}
+    @Test
+    void testShadingOfAwsCredProviderConfig() {
+        final Configuration conf = new Configuration();
+        conf.setString(
+                "presto.s3.credentials-provider",
+                "com.amazonaws.auth.ContainerCredentialsProvider");
+
+        HadoopConfigLoader configLoader = S3FileSystemFactory.createHadoopConfigLoader();
+        configLoader.setFlinkConfig(conf);
+
+        org.apache.hadoop.conf.Configuration hadoopConfig = configLoader.getOrLoadHadoopConfig();
+        assertThat(hadoopConfig.get("presto.s3.credentials-provider"))
+                .isEqualTo("com.amazonaws.auth.ContainerCredentialsProvider");
+    }
+
+    // ------------------------------------------------------------------------
+    //  utilities
+    // ------------------------------------------------------------------------
+
+    private static void validateBasicCredentials(FileSystem fs) throws Exception {
+        try (PrestoS3FileSystem prestoFs = getPrestoFileSystem(fs)) {
+            AWSCredentialsProvider provider = getAwsCredentialsProvider(prestoFs);
+            assertThat(provider).isInstanceOf(AWSStaticCredentialsProvider.class);
+        }
+    }
+
+    private static PrestoS3FileSystem getPrestoFileSystem(FileSystem fs) {
+        assertThat(fs).isInstanceOf(FlinkS3FileSystem.class);
+        org.apache.hadoop.fs.FileSystem hadoopFs = ((FlinkS3FileSystem) fs).getHadoopFileSystem();
+        assertThat(hadoopFs).isInstanceOf(PrestoS3FileSystem.class);
+        return (PrestoS3FileSystem) hadoopFs;
+    }
+
+    private static AWSCredentialsProvider getAwsCredentialsProvider(PrestoS3FileSystem fs)
+            throws Exception {
+        Field amazonS3field = PrestoS3FileSystem.class.getDeclaredField("s3");
+        amazonS3field.setAccessible(true);
+        AmazonS3Client amazonS3 = (AmazonS3Client) amazonS3field.get(fs);
+
+        Field providerField = AmazonS3Client.class.getDeclaredField("awsCredentialsProvider");
+        providerField.setAccessible(true);
+        return (AWSCredentialsProvider) providerField.get(amazonS3);
+    }
 }

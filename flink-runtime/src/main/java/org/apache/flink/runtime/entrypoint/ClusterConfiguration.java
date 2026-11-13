@@ -18,27 +18,43 @@
 
 package org.apache.flink.runtime.entrypoint;
 
-import org.apache.flink.util.Preconditions;
+import javax.annotation.Nonnull;
+
+import java.util.Properties;
 
 /**
- * Configuration class which contains the parsed command line arguments for
- * the {@link ClusterEntrypoint}.
+ * Configuration class which contains the parsed command line arguments for the {@link
+ * ClusterEntrypoint}.
  */
 public class ClusterConfiguration {
-	private final String configDir;
 
-	private final int restPort;
+    @Nonnull private final String configDir;
 
-	public ClusterConfiguration(String configDir, int restPort) {
-		this.configDir = Preconditions.checkNotNull(configDir);
-		this.restPort = restPort;
-	}
+    @Nonnull private final Properties dynamicProperties;
 
-	public String getConfigDir() {
-		return configDir;
-	}
+    @Nonnull private final String[] args;
 
-	public int getRestPort() {
-		return restPort;
-	}
+    public ClusterConfiguration(
+            @Nonnull String configDir,
+            @Nonnull Properties dynamicProperties,
+            @Nonnull String[] args) {
+        this.configDir = configDir;
+        this.dynamicProperties = dynamicProperties;
+        this.args = args;
+    }
+
+    @Nonnull
+    public String getConfigDir() {
+        return configDir;
+    }
+
+    @Nonnull
+    public Properties getDynamicProperties() {
+        return dynamicProperties;
+    }
+
+    @Nonnull
+    public String[] getArgs() {
+        return args;
+    }
 }

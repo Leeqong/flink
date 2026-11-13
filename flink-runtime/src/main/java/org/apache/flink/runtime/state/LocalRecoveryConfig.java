@@ -18,82 +18,71 @@
 
 package org.apache.flink.runtime.state;
 
-import org.apache.flink.configuration.CheckpointingOptions;
-import org.apache.flink.configuration.Configuration;
-
-import org.slf4j.LoggerFactory;
+import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
+import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
- * This class encapsulates the completed configuration for local recovery, i.e. the root
- * directories into which all file-based snapshots can be written and the general mode for the local recover feature.
+ * This class encapsulates the completed configuration for local recovery, i.e. the root directories
+ * into which all file-based snapshots can be written and the general mode for the local recover
+ * feature.
  */
 public class LocalRecoveryConfig {
 
-	/**
-	 * Enum over modes of local recovery:
-	 * <p><ul>
-	 * <li>DISABLED: disables local recovery.
-	 * <li>ENABLE_FILE_BASED: enables local recovery in a variant that is based on local files.
-	 * </ul>
-	 */
-	public enum LocalRecoveryMode {
-		DISABLED,
-		ENABLE_FILE_BASED;
+    public static final LocalRecoveryConfig BACKUP_AND_RECOVERY_DISABLED =
+            new LocalRecoveryConfig(false, false, null);
 
-		/**
-		 * Extracts the {@link LocalRecoveryMode} from the given configuration. Defaults to LocalRecoveryMode.DISABLED
-		 * if no configuration value is specified or parsing the value resulted in an exception.
-		 *
-		 * @param configuration the configuration that specifies the value for the local recovery mode.
-		 * @return the local recovery mode as found in the config, or LocalRecoveryMode.DISABLED if no mode was
-		 * configured or the specified mode could not be parsed.
-		 */
-		@Nonnull
-		public static LocalRecoveryMode fromConfig(@Nonnull Configuration configuration) {
-			String localRecoveryConfString = configuration.getString(CheckpointingOptions.LOCAL_RECOVERY);
-			try {
-				return LocalRecoveryConfig.LocalRecoveryMode.valueOf(localRecoveryConfString);
-			} catch (IllegalArgumentException ex) {
-				LoggerFactory.getLogger(LocalRecoveryConfig.class).warn(
-					"Exception while parsing configuration of local recovery mode. Local recovery will be disabled.",
-					ex);
-				return LocalRecoveryConfig.LocalRecoveryMode.DISABLED;
-			}
-		}
-	}
+    /** Whether to recover from the local snapshot. */
+    private final boolean localRecoveryEnabled;
 
-	/** The local recovery mode. */
-	@Nonnull
-	private final LocalRecoveryMode localRecoveryMode;
+    /** Whether to do backup checkpoint on local disk. */
+    private final boolean localBackupEnabled;
 
-	/** Encapsulates the root directories and the subtask-specific path. */
-	@Nonnull
-	private final LocalRecoveryDirectoryProvider localStateDirectories;
+    /** Encapsulates the root directories and the subtask-specific path. */
+    @Nullable private final LocalSnapshotDirectoryProvider localStateDirectories;
 
-	public LocalRecoveryConfig(
-		@Nonnull LocalRecoveryMode localRecoveryMode,
-		@Nonnull LocalRecoveryDirectoryProvider directoryProvider) {
-		this.localRecoveryMode = localRecoveryMode;
-		this.localStateDirectories = directoryProvider;
-	}
+    public LocalRecoveryConfig(
+            boolean localRecoveryEnabled,
+            boolean localBackupEnabled,
+            @Nullable LocalSnapshotDirectoryProvider directoryProvider) {
+        this.localRecoveryEnabled = localRecoveryEnabled;
+        this.localBackupEnabled = localBackupEnabled;
+        this.localStateDirectories = directoryProvider;
+    }
 
-	@Nonnull
-	public LocalRecoveryMode getLocalRecoveryMode() {
-		return localRecoveryMode;
-	}
+    public boolean isLocalRecoveryEnabled() {
+        return localRecoveryEnabled;
+    }
 
-	@Nonnull
-	public LocalRecoveryDirectoryProvider getLocalStateDirectoryProvider() {
-		return localStateDirectories;
-	}
+    public boolean isLocalBackupEnabled() {
+        return localBackupEnabled;
+    }
 
-	@Override
-	public String toString() {
-		return "LocalRecoveryConfig{" +
-			"localRecoveryMode=" + localRecoveryMode +
-			", localStateDirectories=" + localStateDirectories +
-			'}';
-	}
+    public boolean isLocalRecoveryOrLocalBackupEnabled() {
+        return localRecoveryEnabled || localBackupEnabled;
+    }
+
+    public Optional<LocalSnapshotDirectoryProvider> getLocalStateDirectoryProvider() {
+        return Optional.ofNullable(localStateDirectories);
+    }
+
+    @Override
+    public String toString() {
+        return "LocalRecoveryConfig{" + "localStateDirectories=" + localStateDirectories + '}';
+    }
+
+    public static Supplier<IllegalStateException> localRecoveryNotEnabled() {
+        return () ->
+                new IllegalStateException(
+                        "Getting a LocalRecoveryDirectoryProvider is only supported with the local recovery enabled. This is a bug and should be reported.");
+    }
+
+    public static LocalRecoveryConfig backupAndRecoveryEnabled(
+            @Nonnull LocalSnapshotDirectoryProvider directoryProvider) {
+        return new LocalRecoveryConfig(true, true, Preconditions.checkNotNull(directoryProvider));
+    }
 }

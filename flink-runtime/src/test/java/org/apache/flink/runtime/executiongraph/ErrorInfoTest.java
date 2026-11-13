@@ -19,44 +19,40 @@
 package org.apache.flink.runtime.executiongraph;
 
 import org.apache.flink.core.testutils.CommonTestUtils;
+import org.apache.flink.testutils.ClassLoaderUtils;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.Serializable;
-import java.net.URL;
-import java.net.URLClassLoader;
 
-import static org.junit.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * Simple test for the {@link ErrorInfo}.
- */
-public class ErrorInfoTest {
+/** Simple test for the {@link ErrorInfo}. */
+class ErrorInfoTest {
 
-	@Test
-	public void testSerializationWithExceptionOutsideClassLoader() throws Exception {
-		final ErrorInfo error = new ErrorInfo(new ExceptionWithCustomClassLoader(), System.currentTimeMillis());
-		final ErrorInfo copy = CommonTestUtils.createCopySerializable(error);
+    @Test
+    void testSerializationWithExceptionOutsideClassLoader() throws Exception {
+        final ErrorInfo error =
+                new ErrorInfo(new ExceptionWithCustomClassLoader(), System.currentTimeMillis());
+        final ErrorInfo copy = CommonTestUtils.createCopySerializable(error);
 
-		assertEquals(error.getTimestamp(), copy.getTimestamp());
-		assertEquals(error.getExceptionAsString(), copy.getExceptionAsString());
-		assertEquals(error.getException().getMessage(), copy.getException().getMessage());
+        assertThat(copy.getTimestamp()).isEqualTo(error.getTimestamp());
+        assertThat(copy.getExceptionAsString()).isEqualTo(error.getExceptionAsString());
+        assertThat(copy.getException().getMessage()).isEqualTo(error.getException().getMessage());
+    }
 
-	}
+    // ------------------------------------------------------------------------
 
-	// ------------------------------------------------------------------------
+    private static final class ExceptionWithCustomClassLoader extends Exception {
 
-	private static final class ExceptionWithCustomClassLoader extends Exception {
+        private static final long serialVersionUID = 42L;
 
-		private static final long serialVersionUID = 42L;
+        @SuppressWarnings("unused")
+        private final Serializable outOfClassLoader =
+                ClassLoaderUtils.createSerializableObjectFromNewClassLoader().getObject();
 
-		private static final ClassLoader CUSTOM_LOADER = new URLClassLoader(new URL[0]);
-
-		@SuppressWarnings("unused")
-		private final Serializable outOfClassLoader = CommonTestUtils.createObjectForClassNotInClassPath(CUSTOM_LOADER);
-
-		public ExceptionWithCustomClassLoader() {
-			super("tada");
-		}
-	}
+        public ExceptionWithCustomClassLoader() {
+            super("tada");
+        }
+    }
 }

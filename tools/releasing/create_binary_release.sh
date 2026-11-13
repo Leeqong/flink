@@ -20,11 +20,13 @@
 ##
 ## Variables with defaults (if not overwritten by environment)
 ##
-RELEASE_VERSION=${RELEASE_VERSION:-1.3-SNAPSHOT}
-SCALA_VERSION=none
-HADOOP_VERSION=none
 SKIP_GPG=${SKIP_GPG:-false}
 MVN=${MVN:-mvn}
+
+if [ -z "${RELEASE_VERSION:-}" ]; then
+    echo "RELEASE_VERSION was not set."
+    exit 1
+fi
 
 # fail immediately
 set -o errexit
@@ -40,63 +42,131 @@ fi
 
 if [ "$(uname)" == "Darwin" ]; then
     SHASUM="shasum -a 512"
-    MD5SUM="md5 -r"
 else
     SHASUM="sha512sum"
-    MD5SUM="md5sum"
 fi
+
+cd ..
+
+FLINK_DIR=`pwd`
+RELEASE_DIR=${FLINK_DIR}/tools/releasing/release
+PYTHON_RELEASE_DIR=${RELEASE_DIR}/python
+mkdir -p ${PYTHON_RELEASE_DIR}
 
 ###########################
 
 # build maven package, create Flink distribution, generate signature
 make_binary_release() {
-  NAME=$1
-  FLAGS=$2
-  SCALA_VERSION=$3
-
-  echo "Creating binary release name: $NAME, flags: $FLAGS, SCALA_VERSION: ${SCALA_VERSION}"
-  if [[ -z $NAME ]]; then
-    dir_name="flink-$RELEASE_VERSION-bin-scala_${SCALA_VERSION}"
-  else
-    dir_name="flink-$RELEASE_VERSION-bin-$NAME-scala_${SCALA_VERSION}"
-  fi
+  local DEFAULT_SCALA_VERSION
+  DEFAULT_SCALA_VERSION="2.12"
+  echo "Creating binary release"
+  # the scala version is still included in the name to not break "backwards-compatibility" of the naming scheme
+  dir_name="flink-$RELEASE_VERSION-bin-scala_${DEFAULT_SCALA_VERSION}"
 
   # enable release profile here (to check for the maven version)
-  $MVN clean package $FLAGS -DskipTests -Prelease,scala-${SCALA_VERSION} -Dgpg.skip
+  $MVN clean package -Prelease -pl flink-dist -am -Dgpg.skip -Dcheckstyle.skip=true -DskipTests
 
-  cd flink-dist/target/flink-*-bin/
+  cd flink-dist/target/flink-${RELEASE_VERSION}-bin
+  ${FLINK_DIR}/tools/releasing/collect_license_files.sh ./flink-${RELEASE_VERSION} ./flink-${RELEASE_VERSION}
   tar czf "${dir_name}.tgz" flink-*
 
-  cp flink-*.tgz ../../../
-  cd ../../../
+  cp flink-*.tgz ${RELEASE_DIR}
+  cd ${RELEASE_DIR}
 
-  # Sign md5 and sha the tgz
+  # Sign sha the tgz
   if [ "$SKIP_GPG" == "false" ] ; then
     gpg --armor --detach-sig "${dir_name}.tgz"
   fi
-  $MD5SUM "${dir_name}.tgz" > "${dir_name}.tgz.md5"
-  $SHASUM "${dir_name}.tgz" > "${dir_name}.tgz.sha"
+  $SHASUM "${dir_name}.tgz" > "${dir_name}.tgz.sha512"
+
+  cd ${FLINK_DIR}
 }
 
-cd ..
+make_python_release() {
+  PYFLINK_VERSION=${RELEASE_VERSION/-SNAPSHOT/.dev0}
+  cd flink-python/
+  # use lint-python.sh script to create a python environment.
+  dev/lint-python.sh -s basic
+  source dev/.uv/bin/activate
+  uv pip install --group dev
 
+  # build apache-flink-libraries distributions
+  pushd apache-flink-libraries
+  uv build
+  pushd dist/
+  apache_flink_libraries_actual_sdist_name=`echo *.tar.gz`
+  apache_flink_libraries_release_sdist_name="apache_flink_libraries-${PYFLINK_VERSION}.tar.gz"
 
-if [ "$SCALA_VERSION" == "none" ] && [ "$HADOOP_VERSION" == "none" ]; then
-  make_binary_release "" "-DwithoutHadoop" "2.11"
-  make_binary_release "hadoop24" "-Dhadoop.version=2.4.1" "2.11"
-  make_binary_release "hadoop26" "-Dhadoop.version=2.6.5" "2.11"
-  make_binary_release "hadoop27" "-Dhadoop.version=2.7.5" "2.11"
-  make_binary_release "hadoop28" "-Dhadoop.version=2.8.3" "2.11"
-elif [ "$SCALA_VERSION" == none ] && [ "$HADOOP_VERSION" != "none" ]
-then
-  make_binary_release "hadoop2" "-Dhadoop.version=$HADOOP_VERSION" "2.11"
-elif [ "$SCALA_VERSION" != none ] && [ "$HADOOP_VERSION" == "none" ]
-then
-  make_binary_release "" "-DwithoutHadoop" "$SCALA_VERSION"
-  make_binary_release "hadoop24" "-Dhadoop.version=2.4.1" "$SCALA_VERSION"
-  make_binary_release "hadoop26" "-Dhadoop.version=2.6.5" "$SCALA_VERSION"
-  make_binary_release "hadoop27" "-Dhadoop.version=2.7.3" "$SCALA_VERSION"
-  make_binary_release "hadoop28" "-Dhadoop.version=2.8.0" "$SCALA_VERSION"
-else
-  make_binary_release "hadoop2x" "-Dhadoop.version=$HADOOP_VERSION" "$SCALA_VERSION"
-fi
+  if [[ "$apache_flink_libraries_actual_sdist_name" != "$apache_flink_libraries_release_sdist_name" ]] ; then
+    echo -e "\033[31;1mThe file name of the python package: ${apache_flink_libraries_actual_sdist_name} is not consistent with given release version: ${PYFLINK_VERSION}!\033[0m"
+    exit 1
+  fi
+
+  cp ${apache_flink_libraries_actual_sdist_name} "${PYTHON_RELEASE_DIR}/${apache_flink_libraries_release_sdist_name}"
+
+  apache_flink_libraries_actual_wheel_name=`echo *.whl`
+  apache_flink_libraries_release_wheel_name="apache_flink_libraries-${PYFLINK_VERSION}-py2.py3-none-any.whl"
+
+  if [[ "$apache_flink_libraries_actual_wheel_name" != "$apache_flink_libraries_release_wheel_name" ]] ; then
+    echo -e "\033[31;1mThe file name of the python package: ${apache_flink_libraries_actual_wheel_name} is not consistent with given release version: ${PYFLINK_VERSION}!\033[0m"
+    exit 1
+  fi
+
+  cp ${apache_flink_libraries_actual_wheel_name} "${PYTHON_RELEASE_DIR}/${apache_flink_libraries_release_wheel_name}"
+
+  popd
+
+  popd
+
+  uv build --sdist
+  deactivate
+  cd dist/
+  pyflink_actual_name=`echo *.tar.gz`
+  pyflink_release_name="apache_flink-${PYFLINK_VERSION}.tar.gz"
+
+  if [[ "$pyflink_actual_name" != "$pyflink_release_name" ]] ; then
+    echo -e "\033[31;1mThe file name of the python package: ${pyflink_actual_name} is not consistent with given release version: ${PYFLINK_VERSION}!\033[0m"
+    exit 1
+  fi
+
+  cp ${pyflink_actual_name} "${PYTHON_RELEASE_DIR}/${pyflink_release_name}"
+
+  wheel_packages_num=0
+  # py39,py310,py311,py312,py313 for mac 10.9, 11.0 and linux (15 wheel packages)
+  EXPECTED_WHEEL_PACKAGES_NUM=15
+  # Need to move the downloaded wheel packages from Azure CI to the directory flink-python/dist manually.
+  for wheel_file in *.whl; do
+    if [[ ! ${wheel_file} =~ ^apache_flink-$PYFLINK_VERSION- ]]; then
+        echo -e "\033[31;1mThe file name of the python package: ${wheel_file} is not consistent with given release version: ${PYFLINK_VERSION}!\033[0m"
+        exit 1
+    fi
+    cp ${wheel_file} "${PYTHON_RELEASE_DIR}/${wheel_file}"
+    wheel_packages_num=$((wheel_packages_num+1))
+  done
+  if [[ ${wheel_packages_num} != ${EXPECTED_WHEEL_PACKAGES_NUM} ]]; then
+    echo -e "\033[31;1mThe number of wheel packages ${wheel_packages_num} is not equal to the expected number ${EXPECTED_WHEEL_PACKAGES_NUM}!\033[0m"
+    exit 1
+  fi
+
+  cd ${PYTHON_RELEASE_DIR}
+
+  # Sign sha the tgz and wheel packages
+  if [ "$SKIP_GPG" == "false" ] ; then
+    gpg --armor --detach-sig "${apache_flink_libraries_release_sdist_name}"
+    gpg --armor --detach-sig "${pyflink_release_name}"
+    for wheel_file in *.whl; do
+      gpg --armor --detach-sig "${wheel_file}"
+    done
+  fi
+  $SHASUM "${apache_flink_libraries_release_sdist_name}" > "${apache_flink_libraries_release_sdist_name}.sha512"
+  $SHASUM "${pyflink_release_name}" > "${pyflink_release_name}.sha512"
+
+  for wheel_file in *.whl; do
+    $SHASUM "${wheel_file}" > "${wheel_file}.sha512"
+  done
+
+  cd ${FLINK_DIR}
+}
+
+make_binary_release
+make_python_release

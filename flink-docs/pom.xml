@@ -25,14 +25,30 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-parent</artifactId>
-		<version>1.6-SNAPSHOT</version>
-		<relativePath>..</relativePath>
+		<version>2.5-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-docs</artifactId>
-	<name>flink-docs</name>
+	<name>Flink : Docs</name>
+
+	<properties>
+		<generated.docs.dir>./docs/layouts/shortcodes/generated</generated.docs.dir>
+		<generated.static.dir>./docs/static/generated</generated.static.dir>
+		<japicmp.skip>true</japicmp.skip>
+	</properties>
 
 	<dependencies>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-shaded-swagger</artifactId>
+			<version>${flink.shaded.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-annotations</artifactId>
+			<version>${project.version}</version>
+		</dependency>
 		<dependency>
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-core</artifactId>
@@ -40,62 +56,162 @@ under the License.
 		</dependency>
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-java</artifactId>
+			<artifactId>flink-streaming-java</artifactId>
 			<version>${project.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-runtime_${scala.binary.version}</artifactId>
+			<artifactId>flink-runtime</artifactId>
 			<version>${project.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-yarn_${scala.binary.version}</artifactId>
+			<artifactId>flink-runtime</artifactId>
+			<version>${project.version}</version>
+			<type>test-jar</type>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-api-java</artifactId>
 			<version>${project.version}</version>
 		</dependency>
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-mesos_${scala.binary.version}</artifactId>
+			<artifactId>flink-sql-client</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-metrics-prometheus</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-metrics-influxdb</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-metrics-otel</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<!-- necessary for loading the web-submission extension -->
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-runtime-web</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-yarn</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-kubernetes</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-external-resource-gpu</artifactId>
 			<version>${project.version}</version>
 		</dependency>
 
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-shaded-asm-9</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-shaded-netty</artifactId>
 		</dependency>
-
 		<dependency>
-			<!-- We use standard jackson since jackson-module-jsonSchema isn't part of flink-shaded-jackson -->
-			<groupId>com.fasterxml.jackson.core</groupId>
-			<artifactId>jackson-core</artifactId>
-			<version>${jackson.version}</version>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-shaded-jackson-module-jsonSchema</artifactId>
 		</dependency>
 		<dependency>
-			<!-- We use standard jackson since jackson-module-jsonSchema isn't part of flink-shaded-jackson -->
-			<groupId>com.fasterxml.jackson.core</groupId>
-			<artifactId>jackson-databind</artifactId>
-			<version>${jackson.version}</version>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-statebackend-rocksdb</artifactId>
+			<version>${project.version}</version>
 		</dependency>
 		<dependency>
-			<groupId>com.fasterxml.jackson.module</groupId>
-			<artifactId>jackson-module-jsonSchema</artifactId>
-			<version>${jackson.version}</version>
-		</dependency>
-
-		<dependency>
-			<groupId>org.slf4j</groupId>
-			<artifactId>slf4j-log4j12</artifactId>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-statebackend-forst</artifactId>
+			<version>${project.version}</version>
 		</dependency>
 		<dependency>
-			<groupId>log4j</groupId>
-			<artifactId>log4j</artifactId>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-python</artifactId>
+			<version>${project.version}</version>
 		</dependency>
 
 		<dependency>
-			<!-- Required because the surefire plugin tries to load the Flip6 category annotation -->
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-cep</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.logging.log4j</groupId>
+			<artifactId>log4j-slf4j2-impl</artifactId>
+			<scope>compile</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.logging.log4j</groupId>
+			<artifactId>log4j-api</artifactId>
+			<scope>compile</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.logging.log4j</groupId>
+			<artifactId>log4j-core</artifactId>
+			<scope>compile</scope>
+		</dependency>
+
+		<dependency>
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-test-utils-junit</artifactId>
 			<version>${project.version}</version>
+			<scope>test</scope>
+		</dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-dstl-dfs</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-sql-gateway</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-model-openai</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-model-triton</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-sql-gateway</artifactId>
+			<version>${project.version}</version>
+			<type>test-jar</type>
+		</dependency>
+
+        <dependency>
+			<!-- Used for parsing HTML -->
+			<groupId>org.jsoup</groupId>
+			<artifactId>jsoup</artifactId>
+			<version>1.23.2</version>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
@@ -126,7 +242,26 @@ under the License.
 					</execution>
 				</executions>
 			</plugin>
+
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<systemPropertyVariables>
+						<rootDir>${rootDir}</rootDir>
+					</systemPropertyVariables>
+				</configuration>
+			</plugin>
 		</plugins>
+
+		<pluginManagement>
+			<plugins>
+				<plugin>
+					<artifactId>maven-antrun-plugin</artifactId>
+					<version>1.7</version>
+				</plugin>
+			</plugins>
+		</pluginManagement>
 	</build>
 
 	<profiles>
@@ -141,24 +276,36 @@ under the License.
 				<plugins>
 					<plugin>
 						<artifactId>maven-antrun-plugin</artifactId>
-						<version>1.7</version>
 						<executions>
 							<execution>
+								<id>generate-rest-docs</id>
 								<phase>package</phase>
 								<goals>
 									<goal>run</goal>
 								</goals>
+								<configuration>
+									<target>
+										<mkdir dir="${rootDir}/${generated.docs.dir}"/>
+										<java classname="org.apache.flink.docs.rest.RuntimeRestAPIDocGenerator" fork="true" failonerror="true">
+											<classpath refid="maven.compile.classpath"/>
+											<arg value="${rootDir}/${generated.docs.dir}/"/>
+										</java>
+										<java classname="org.apache.flink.docs.rest.RuntimeOpenApiSpecGenerator" fork="true" failonerror="true">
+											<classpath refid="maven.compile.classpath"/>
+											<arg value="${rootDir}/${generated.static.dir}/"/>
+										</java>
+										<java classname="org.apache.flink.docs.rest.SqlGatewayRestAPIDocGenerator" fork="true" failonerror="true">
+											<classpath refid="maven.compile.classpath"/>
+											<arg value="${rootDir}/${generated.docs.dir}/"/>
+										</java>
+										<java classname="org.apache.flink.docs.rest.SqlGatewayOpenApiSpecGenerator" fork="true" failonerror="true">
+											<classpath refid="maven.compile.classpath"/>
+											<arg value="${rootDir}/${generated.static.dir}/"/>
+										</java>
+									</target>
+								</configuration>
 							</execution>
 						</executions>
-						<configuration>
-							<target>
-								<mkdir dir="${rootDir}/${generated.docs.dir}"/>
-								<java classname="org.apache.flink.docs.rest.RestAPIDocGenerator" fork="true">
-									<classpath refid="maven.compile.classpath"/>
-									<arg value="${rootDir}/${generated.docs.dir}/"/>
-								</java>
-							</target>
-						</configuration>
 					</plugin>
 				</plugins>
 			</build>
@@ -174,36 +321,25 @@ under the License.
 				<plugins>
 					<plugin>
 						<artifactId>maven-antrun-plugin</artifactId>
-						<version>1.7</version>
 						<executions>
 							<execution>
+								<id>generate-config-docs</id>
 								<phase>package</phase>
 								<goals>
 									<goal>run</goal>
 								</goals>
+								<configuration>
+									<target>
+										<mkdir dir="${rootDir}/${generated.docs.dir}"/>
+										<java classname="org.apache.flink.docs.configuration.ConfigOptionsDocGenerator" fork="true" failonerror="true">
+											<classpath refid="maven.compile.classpath" />
+											<arg value="${rootDir}/${generated.docs.dir}/" />
+											<arg value="${rootDir}" />
+										</java>
+									</target>
+								</configuration>
 							</execution>
 						</executions>
-						<configuration>
-							<target>
-								<mkdir dir="${rootDir}/${generated.docs.dir}"/>
-								<java classname="org.apache.flink.docs.configuration.ConfigOptionsDocGenerator" fork="true">
-									<classpath refid="maven.compile.classpath" />
-									<arg value="${rootDir}/${generated.docs.dir}/" />
-									<arg value="${rootDir}" />
-									<!--packages with configuration classes-->
-									<arg value="flink-core" />
-									<arg value="org.apache.flink.configuration" />
-									<arg value="flink-runtime" />
-									<arg value="org.apache.flink.runtime.io.network.netty" />
-									<arg value="flink-yarn" />
-									<arg value="org.apache.flink.yarn.configuration" />
-									<arg value="flink-mesos" />
-									<arg value="org.apache.flink.mesos.configuration" />
-									<arg value="flink-mesos" />
-									<arg value="org.apache.flink.mesos.runtime.clusterframework" />
-								</java>
-							</target>
-						</configuration>
 					</plugin>
 				</plugins>
 			</build>

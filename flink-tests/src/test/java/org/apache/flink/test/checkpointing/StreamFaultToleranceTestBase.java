@@ -18,96 +18,154 @@
 
 package org.apache.flink.test.checkpointing;
 
-import org.apache.flink.api.common.restartstrategy.RestartStrategies;
+import org.apache.flink.changelog.fs.FsStateChangelogStorageFactory;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.test.util.MiniClusterResource;
-import org.apache.flink.test.util.TestUtils;
-import org.apache.flink.util.TestLogger;
+import org.apache.flink.streaming.util.RestartStrategyUtils;
+import org.apache.flink.test.util.MiniClusterWithClientResource;
+import org.apache.flink.test.util.SuccessException;
+import org.apache.flink.testutils.junit.extensions.parameterized.Parameter;
+import org.apache.flink.testutils.junit.extensions.parameterized.ParameterizedTestExtension;
+import org.apache.flink.testutils.junit.extensions.parameterized.Parameters;
+import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.TestLoggerExtension;
 
-import org.junit.Assert;
-import org.junit.ClassRule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.TestTemplate;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
 import java.io.Serializable;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collection;
 
-/**
- * Test base for fault tolerant streaming programs.
- */
-public abstract class StreamFaultToleranceTestBase extends TestLogger {
+import static org.apache.flink.test.util.TestUtils.submitJobAndWaitForResult;
+import static org.assertj.core.api.Assertions.assertThat;
 
-	protected static final int NUM_TASK_MANAGERS = 3;
-	protected static final int NUM_TASK_SLOTS = 4;
-	protected static final int PARALLELISM = NUM_TASK_MANAGERS * NUM_TASK_SLOTS;
+/** Test base for fault tolerant streaming programs. */
+@ExtendWith({TestLoggerExtension.class, ParameterizedTestExtension.class})
+abstract class StreamFaultToleranceTestBase {
 
-	@ClassRule
-	public static final MiniClusterResource MINI_CLUSTER_RESOURCE = new MiniClusterResource(
-		new MiniClusterResource.MiniClusterResourceConfiguration(
-			new Configuration(),
-			NUM_TASK_MANAGERS,
-			NUM_TASK_SLOTS));
+    @Parameters(name = "FailoverStrategy: {0}")
+    private static Collection<FailoverStrategy> parameters() {
+        return Arrays.asList(
+                FailoverStrategy.RestartAllFailoverStrategy,
+                FailoverStrategy.RestartPipelinedRegionFailoverStrategy);
+    }
 
-	/**
-	 * Implementations are expected to assemble the test topology in this function
-	 * using the provided {@link StreamExecutionEnvironment}.
-	 */
-	public abstract void testProgram(StreamExecutionEnvironment env);
+    /** The failover strategy to use. */
+    protected enum FailoverStrategy {
+        RestartAllFailoverStrategy,
+        RestartPipelinedRegionFailoverStrategy
+    }
 
-	/**
-	 * Implementations are expected to provide test here to verify the correct behavior.
-	 */
-	public abstract void postSubmit() throws Exception;
+    @Parameter protected FailoverStrategy failoverStrategy;
 
-	/**
-	 * Runs the following program the test program defined in {@link #testProgram(StreamExecutionEnvironment)}
-	 * followed by the checks in {@link #postSubmit}.
-	 */
-	@Test
-	public void runCheckpointedProgram() throws Exception {
-		try {
-			StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-			env.setParallelism(PARALLELISM);
-			env.enableCheckpointing(500);
-			env.getConfig().disableSysoutLogging();
-			env.setRestartStrategy(RestartStrategies.fixedDelayRestart(Integer.MAX_VALUE, 0L));
+    protected static final int NUM_TASK_MANAGERS = 3;
+    protected static final int NUM_TASK_SLOTS = 4;
+    protected static final int PARALLELISM = NUM_TASK_MANAGERS * NUM_TASK_SLOTS;
 
-			testProgram(env);
+    private MiniClusterWithClientResource cluster;
 
-			TestUtils.tryExecute(env, "Fault Tolerance Test");
+    @TempDir private static File tempFolder;
 
-			postSubmit();
-		}
-		catch (Exception e) {
-			e.printStackTrace();
-			Assert.fail(e.getMessage());
-		}
-	}
+    @BeforeEach
+    void setup() throws Exception {
+        Configuration configuration = new Configuration();
+        switch (failoverStrategy) {
+            case RestartPipelinedRegionFailoverStrategy:
+                configuration.set(JobManagerOptions.EXECUTION_FAILOVER_STRATEGY, "region");
+                break;
+            case RestartAllFailoverStrategy:
+                configuration.set(JobManagerOptions.EXECUTION_FAILOVER_STRATEGY, "full");
+        }
 
-	// --------------------------------------------------------------------------------------------
-	//  Frequently used utilities
-	// --------------------------------------------------------------------------------------------
+        // Configure DFS DSTL for this test as it might produce too much GC pressure if
+        // ChangelogStateBackend is used.
+        // Doing it on cluster level unconditionally as randomization currently happens on the job
+        // level (environment); while this factory can only be set on the cluster level.
+        FsStateChangelogStorageFactory.configure(
+                configuration, tempFolder, Duration.ofMinutes(1), 10);
+        cluster =
+                new MiniClusterWithClientResource(
+                        new MiniClusterResourceConfiguration.Builder()
+                                .setConfiguration(configuration)
+                                .setNumberTaskManagers(NUM_TASK_MANAGERS)
+                                .setNumberSlotsPerTaskManager(NUM_TASK_SLOTS)
+                                .build());
+        cluster.before();
+    }
 
-	/**
-	 * POJO storing prefix, value, and count.
-	 */
-	@SuppressWarnings("serial")
-	public static class PrefixCount implements Serializable {
+    @AfterEach
+    void shutDownExistingCluster() {
+        if (cluster != null) {
+            cluster.after();
+            cluster = null;
+        }
+    }
 
-		public String prefix;
-		public String value;
-		public long count;
+    /**
+     * Implementations are expected to assemble the test topology in this function using the
+     * provided {@link StreamExecutionEnvironment}.
+     */
+    public abstract void testProgram(StreamExecutionEnvironment env);
 
-		public PrefixCount() {}
+    /** Implementations are expected to provide test here to verify the correct behavior. */
+    public abstract void postSubmit() throws Exception;
 
-		public PrefixCount(String prefix, String value, long count) {
-			this.prefix = prefix;
-			this.value = value;
-			this.count = count;
-		}
+    /**
+     * Runs the following program the test program defined in {@link
+     * #testProgram(StreamExecutionEnvironment)} followed by the checks in {@link #postSubmit}.
+     */
+    @TestTemplate
+    void runCheckpointedProgram() throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(PARALLELISM);
+        env.enableCheckpointing(500);
+        RestartStrategyUtils.configureFixedDelayRestartStrategy(env, Integer.MAX_VALUE, 0L);
 
-		@Override
-		public String toString() {
-			return prefix + " / " + value;
-		}
-	}
+        testProgram(env);
+
+        JobGraph jobGraph = env.getStreamGraph().getJobGraph();
+        try {
+            submitJobAndWaitForResult(
+                    cluster.getClusterClient(), jobGraph, getClass().getClassLoader());
+        } catch (Exception e) {
+            assertThat(ExceptionUtils.findThrowable(e, SuccessException.class)).isPresent();
+        }
+
+        postSubmit();
+    }
+
+    // --------------------------------------------------------------------------------------------
+    //  Frequently used utilities
+    // --------------------------------------------------------------------------------------------
+
+    /** POJO storing prefix, value, and count. */
+    @SuppressWarnings("serial")
+    public static class PrefixCount implements Serializable {
+
+        public String prefix;
+        public String value;
+        public long count;
+
+        public PrefixCount() {}
+
+        public PrefixCount(String prefix, String value, long count) {
+            this.prefix = prefix;
+            this.value = value;
+            this.count = count;
+        }
+
+        @Override
+        public String toString() {
+            return prefix + " / " + value;
+        }
+    }
 }

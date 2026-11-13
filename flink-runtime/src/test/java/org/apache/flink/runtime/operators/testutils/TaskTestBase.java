@@ -22,122 +22,146 @@ import org.apache.flink.api.common.functions.RichFunction;
 import org.apache.flink.api.common.io.DelimitedInputFormat;
 import org.apache.flink.api.common.io.FileOutputFormat;
 import org.apache.flink.api.common.operators.util.UserCodeClassWrapper;
-import org.apache.flink.api.common.operators.util.UserCodeObjectWrapper;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.FileSystem.WriteMode;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.io.network.partition.consumer.IteratorWrappingTestSingleInputGate;
+import org.apache.flink.runtime.jobgraph.InputOutputFormatContainer;
+import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.operators.Driver;
 import org.apache.flink.runtime.operators.shipping.ShipStrategyType;
 import org.apache.flink.runtime.operators.util.TaskConfig;
-import org.apache.flink.runtime.state.TestTaskStateManager;
 import org.apache.flink.runtime.testutils.recordutils.RecordSerializerFactory;
 import org.apache.flink.types.Record;
 import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.MutableObjectIterator;
-import org.apache.flink.util.TestLogger;
 
-import org.junit.After;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.util.List;
 
-public abstract class TaskTestBase extends TestLogger {
+public abstract class TaskTestBase {
 
-	protected long memorySize = 0;
+    @TempDir protected java.nio.file.Path tempFolder;
 
-	protected MockInputSplitProvider inputSplitProvider;
+    protected long memorySize = 0;
 
-	protected MockEnvironment mockEnv;
+    protected MockInputSplitProvider inputSplitProvider;
 
-	public void initEnvironment(long memorySize, int bufferSize) {
-		this.memorySize = memorySize;
-		this.inputSplitProvider = new MockInputSplitProvider();
-		TestTaskStateManager taskStateManager = new TestTaskStateManager();
-		this.mockEnv = new MockEnvironment("mock task", this.memorySize, this.inputSplitProvider, bufferSize, taskStateManager);
-	}
+    protected MockEnvironment mockEnv;
 
-	public IteratorWrappingTestSingleInputGate<Record> addInput(MutableObjectIterator<Record> input, int groupId) {
-		return addInput(input, groupId, true);
-	}
+    protected void initEnvironment(long memorySize, int bufferSize) {
+        this.memorySize = memorySize;
+        this.inputSplitProvider = new MockInputSplitProvider();
+        this.mockEnv =
+                new MockEnvironmentBuilder()
+                        .setTaskName("mock task")
+                        .setManagedMemorySize(this.memorySize)
+                        .setInputSplitProvider(this.inputSplitProvider)
+                        .setBufferSize(bufferSize)
+                        .build();
+    }
 
-	public IteratorWrappingTestSingleInputGate<Record> addInput(MutableObjectIterator<Record> input, int groupId, boolean read) {
-		final IteratorWrappingTestSingleInputGate<Record> reader = this.mockEnv.addInput(input);
-		TaskConfig conf = new TaskConfig(this.mockEnv.getTaskConfiguration());
-		conf.addInputToGroup(groupId);
-		conf.setInputSerializer(RecordSerializerFactory.get(), groupId);
+    protected IteratorWrappingTestSingleInputGate<Record> addInput(
+            MutableObjectIterator<Record> input, int groupId) {
+        return addInput(input, groupId, true);
+    }
 
-		if (read) {
-			reader.notifyNonEmpty();
-		}
+    protected IteratorWrappingTestSingleInputGate<Record> addInput(
+            MutableObjectIterator<Record> input, int groupId, boolean read) {
+        final IteratorWrappingTestSingleInputGate<Record> reader = this.mockEnv.addInput(input);
+        TaskConfig conf = new TaskConfig(this.mockEnv.getTaskConfiguration());
+        conf.addInputToGroup(groupId);
+        conf.setInputSerializer(RecordSerializerFactory.get(), groupId);
 
-		return reader;
-	}
+        if (read) {
+            reader.notifyNonEmpty();
+        }
 
-	public void addOutput(List<Record> output) {
-		this.mockEnv.addOutput(output);
-		TaskConfig conf = new TaskConfig(this.mockEnv.getTaskConfiguration());
-		conf.addOutputShipStrategy(ShipStrategyType.FORWARD);
-		conf.setOutputSerializer(RecordSerializerFactory.get());
-	}
+        return reader;
+    }
 
-	public TaskConfig getTaskConfig() {
-		return new TaskConfig(this.mockEnv.getTaskConfiguration());
-	}
+    protected void addOutput(List<Record> output) {
+        this.mockEnv.addOutput(output);
+        TaskConfig conf = new TaskConfig(this.mockEnv.getTaskConfiguration());
+        conf.addOutputShipStrategy(ShipStrategyType.FORWARD);
+        conf.setOutputSerializer(RecordSerializerFactory.get());
+    }
 
-	public Configuration getConfiguration() {
-		return this.mockEnv.getTaskConfiguration();
-	}
+    protected TaskConfig getTaskConfig() {
+        return new TaskConfig(this.mockEnv.getTaskConfiguration());
+    }
 
-	public void registerTask(
-			@SuppressWarnings("rawtypes") Class<? extends Driver> driver,
-			Class<? extends RichFunction> stubClass) {
+    protected Configuration getConfiguration() {
+        return this.mockEnv.getTaskConfiguration();
+    }
 
-		final TaskConfig config = new TaskConfig(this.mockEnv.getTaskConfiguration());
-		config.setDriver(driver);
-		config.setStubWrapper(new UserCodeClassWrapper<>(stubClass));
-	}
+    protected void registerTask(
+            @SuppressWarnings("rawtypes") Class<? extends Driver> driver,
+            Class<? extends RichFunction> stubClass) {
 
-	public void registerFileOutputTask(Class<? extends FileOutputFormat<Record>> stubClass, String outPath) {
-		registerFileOutputTask(InstantiationUtil.instantiate(stubClass, FileOutputFormat.class), outPath);
-	}
+        final TaskConfig config = new TaskConfig(this.mockEnv.getTaskConfiguration());
+        config.setDriver(driver);
+        config.setStubWrapper(new UserCodeClassWrapper<>(stubClass));
+    }
 
-	public void registerFileOutputTask(FileOutputFormat<Record> outputFormat, String outPath) {
-		TaskConfig dsConfig = new TaskConfig(this.mockEnv.getTaskConfiguration());
+    protected void registerFileOutputTask(
+            Class<? extends FileOutputFormat<Record>> stubClass,
+            String outPath,
+            Configuration formatParams) {
 
-		outputFormat.setOutputFilePath(new Path(outPath));
-		outputFormat.setWriteMode(WriteMode.OVERWRITE);
+        registerFileOutputTask(
+                InstantiationUtil.instantiate(stubClass, FileOutputFormat.class),
+                outPath,
+                formatParams);
+    }
 
-		dsConfig.setStubWrapper(new UserCodeObjectWrapper<>(outputFormat));
-	}
+    protected void registerFileOutputTask(
+            FileOutputFormat<Record> outputFormat, String outPath, Configuration formatParams) {
 
-	public void registerFileInputTask(AbstractInvokable inTask,
-			Class<? extends DelimitedInputFormat<Record>> stubClass, String inPath, String delimiter)
-	{
-		DelimitedInputFormat<Record> format;
-		try {
-			format = stubClass.newInstance();
-		}
-		catch (Throwable t) {
-			throw new RuntimeException("Could not instantiate test input format.", t);
-		}
+        outputFormat.setOutputFilePath(new Path(outPath));
+        outputFormat.setWriteMode(WriteMode.OVERWRITE);
 
-		format.setFilePath(inPath);
-		format.setDelimiter(delimiter);
+        OperatorID operatorID = new OperatorID();
+        new InputOutputFormatContainer(Thread.currentThread().getContextClassLoader())
+                .addOutputFormat(operatorID, outputFormat)
+                .addParameters(operatorID, formatParams)
+                .write(new TaskConfig(this.mockEnv.getTaskConfiguration()));
+    }
 
-		TaskConfig dsConfig = new TaskConfig(this.mockEnv.getTaskConfiguration());
-		dsConfig.setStubWrapper(new UserCodeObjectWrapper<>(format));
+    protected void registerFileInputTask(
+            AbstractInvokable inTask,
+            Class<? extends DelimitedInputFormat<Record>> stubClass,
+            String inPath,
+            String delimiter) {
 
-		this.inputSplitProvider.addInputSplits(inPath, 5);
-	}
+        DelimitedInputFormat<Record> format;
+        try {
+            format = stubClass.newInstance();
+        } catch (Throwable t) {
+            throw new RuntimeException("Could not instantiate test input format.", t);
+        }
 
-	public MemoryManager getMemoryManager() {
-		return this.mockEnv.getMemoryManager();
-	}
+        format.setFilePath(inPath);
+        format.setDelimiter(delimiter);
 
-	@After
-	public void shutdown() {
-		mockEnv.close();
-	}
+        OperatorID operatorID = new OperatorID();
+        new InputOutputFormatContainer(Thread.currentThread().getContextClassLoader())
+                .addInputFormat(operatorID, format)
+                .write(new TaskConfig(this.mockEnv.getTaskConfiguration()));
+
+        this.inputSplitProvider.addInputSplits(inPath, 5);
+    }
+
+    protected MemoryManager getMemoryManager() {
+        return this.mockEnv.getMemoryManager();
+    }
+
+    @AfterEach
+    void shutdown() throws Exception {
+        mockEnv.close();
+    }
 }

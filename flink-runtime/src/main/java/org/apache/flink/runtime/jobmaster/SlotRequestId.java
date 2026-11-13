@@ -18,15 +18,22 @@
 
 package org.apache.flink.runtime.jobmaster;
 
+import org.apache.flink.runtime.jobmaster.slotpool.PhysicalSlot;
+import org.apache.flink.runtime.jobmaster.slotpool.PhysicalSlotProvider;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotPool;
-import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.util.AbstractID;
 
 /**
- * Request id identifying slot requests made by the {@link SlotProvider} towards the
- * {@link SlotPool}.
+ * This ID identifies the request for a slot from the Execution to the {@link SlotPool} or {@link
+ * PhysicalSlotProvider}. There are various slot types like {@link PhysicalSlot}, {@link
+ * LogicalSlot} or {@code SharedSlot} in the case of slot sharing.
+ *
+ * <p>This ID serves a different purpose than the {@link
+ * org.apache.flink.runtime.clusterframework.types.AllocationID AllocationID}, which identifies the
+ * request of a physical slot, issued from the SlotPool via the ResourceManager to the TaskManager.
  */
 public final class SlotRequestId extends AbstractID {
+
     private static final long serialVersionUID = -6072105912250154283L;
 
     public SlotRequestId(long lowerPart, long upperPart) {
@@ -34,4 +41,9 @@ public final class SlotRequestId extends AbstractID {
     }
 
     public SlotRequestId() {}
+
+    @Override
+    public String toString() {
+        return "SlotRequestId{" + super.toString() + '}';
+    }
 }

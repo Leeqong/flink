@@ -1,4 +1,4 @@
-
+<!--
 *Thank you very much for contributing to Apache Flink - we are happy that you want to help us improve Flink. To help the community review your contribution in the best possible way, please go through the checklist below, which will get the contribution into a shape in which it can be best reviewed.*
 
 *Please understand that we do not do this to make contributions to Flink a hassle. In order to uphold a high standard of quality for code contributions, while at the same time managing a large number of contributions, we need contributors to prepare the contributions well, and give reviewers enough contextual information for the review. Please also understand that contributions that do not follow this guide will take longer to review and thus typically be picked up with lower priority by the community.*
@@ -12,7 +12,7 @@
 
   - Fill out the template below to describe the changes contributed by the pull request. That will give reviewers the context they need to do the review.
   
-  - Make sure that the change passes the automated tests, i.e., `mvn clean verify` passes. You can set up Travis CI to do that following [this guide](http://flink.apache.org/contribute-code.html#best-practices).
+  - Make sure that the change passes the automated tests, i.e., `mvn clean verify` passes. You can set up Azure Pipelines CI to do that following [this guide](https://cwiki.apache.org/confluence/display/FLINK/Azure+Pipelines#AzurePipelines-Tutorial:SettingupAzurePipelinesforaforkoftheFlinkrepository).
 
   - Each pull request should address only one issue, not mix up code from multiple issues.
   
@@ -22,6 +22,7 @@
 
 
 **(The sections below can be removed for hotfixes of typos)**
+-->
 
 ## What is the purpose of the change
 
@@ -37,6 +38,8 @@
 
 
 ## Verifying this change
+
+Please make sure both new and modified tests in this PR follow [the conventions for tests defined in our code quality guide](https://flink.apache.org/how-to-contribute/code-style-and-quality-common/#7-testing).
 
 *(Please pick either of the following options)*
 
@@ -54,7 +57,7 @@ This change added tests and can be verified as follows:
   - *Added integration tests for end-to-end deployment with large payloads (100MB)*
   - *Extended integration test for recovery after master (JobManager) failure*
   - *Added test that validates that TaskInfo is transferred only once across recoveries*
-  - *Manually verified the change by running a 4 node cluser with 2 JobManagers and 4 TaskManagers, a stateful streaming program, and killing one JobManager and two TaskManagers during the execution, verifying that recovery happens correctly.*
+  - *Manually verified the change by running a 4 node cluster with 2 JobManagers and 4 TaskManagers, a stateful streaming program, and killing one JobManager and two TaskManagers during the execution, verifying that recovery happens correctly.*
 
 ## Does this pull request potentially affect one of the following parts:
 
@@ -62,10 +65,30 @@ This change added tests and can be verified as follows:
   - The public API, i.e., is any changed class annotated with `@Public(Evolving)`: (yes / no)
   - The serializers: (yes / no / don't know)
   - The runtime per-record code paths (performance sensitive): (yes / no / don't know)
-  - Anything that affects deployment or recovery: JobManager (and its components), Checkpointing, Yarn/Mesos, ZooKeeper: (yes / no / don't know)
+  - Anything that affects deployment or recovery: JobManager (and its components), Checkpointing, Kubernetes/Yarn, ZooKeeper: (yes / no / don't know)
   - The S3 file system connector: (yes / no / don't know)
 
 ## Documentation
 
   - Does this pull request introduce a new feature? (yes / no)
   - If yes, how is the feature documented? (not applicable / docs / JavaDocs / not documented)
+
+---
+
+##### Was generative AI tooling used to co-author this PR?
+
+<!--
+If generative AI tooling has been used in the process of authoring this PR, please
+change the checkbox below to `[X]` and replace the placeholder in the "Generated-by"
+line with the tool name and version. Otherwise remove the "Generated-by" line.
+See the ASF Generative Tooling Guidance for details:
+https://www.apache.org/legal/generative-tooling.html
+
+You are responsible for the quality and correctness of every change in this PR
+regardless of the tooling used. Low-effort AI-generated PRs will be closed. See
+AGENTS.md for the full guidance.
+-->
+
+- [ ] Yes (please specify the tool below)
+
+Generated-by: [Tool Name and Version]

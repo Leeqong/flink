@@ -18,11 +18,23 @@
 ################################################################################
 
 # Start/stop a Flink JobManager.
-USAGE="Usage: jobmanager.sh ((start|start-foreground) [host] [webui-port])|stop|stop-all"
+USAGE="Usage: jobmanager.sh ((start|start-foreground) [args])|stop|stop-all"
 
 STARTSTOP=$1
-HOST=$2 # optional when starting multiple instances
-WEBUIPORT=$3 # optional when starting multiple instances
+
+if [ -z $2 ] || [[ $2 == "-D" ]]; then
+    # start [-D ...]
+    args=("${@:2}")
+elif [ -z $3 ] || [[ $3 == "-D" ]]; then
+    # legacy path: start <host> [-D ...]
+    HOST=$2
+    args=("${@:3}")
+else
+    # legacy path: start <host> <port> [-D ...]
+    HOST=$2
+    WEBUIPORT=$3
+    args=("${@:4}")
+fi
 
 if [[ $STARTSTOP != "start" ]] && [[ $STARTSTOP != "start-foreground" ]] && [[ $STARTSTOP != "stop" ]] && [[ $STARTSTOP != "stop-all" ]]; then
   echo $USAGE
@@ -34,40 +46,31 @@ bin=`cd "$bin"; pwd`
 
 . "$bin"/config.sh
 
-JOBMANAGER_TYPE=jobmanager
-
-if [[ "${FLINK_MODE}" == "flip6" ]]; then
-    JOBMANAGER_TYPE=standalonesession
-fi
+ENTRYPOINT=standalonesession
 
 if [[ $STARTSTOP == "start" ]] || [[ $STARTSTOP == "start-foreground" ]]; then
-    if [[ ! ${FLINK_JM_HEAP} =~ $IS_NUMBER ]] || [[ "${FLINK_JM_HEAP}" -lt "0" ]]; then
-        echo "[ERROR] Configured JobManager memory size is not a valid value. Please set '${KEY_JOBM_MEM_SIZE}' in ${FLINK_CONF_FILE}."
-        exit 1
-    fi
-
-    if [ "${FLINK_JM_HEAP}" -gt "0" ]; then
-        export JVM_ARGS="$JVM_ARGS -Xms"$FLINK_JM_HEAP"m -Xmx"$FLINK_JM_HEAP"m"
-    fi
-
     # Add JobManager-specific JVM options
     export FLINK_ENV_JAVA_OPTS="${FLINK_ENV_JAVA_OPTS} ${FLINK_ENV_JAVA_OPTS_JM}"
+    parseJmArgsAndExportLogs "${args[@]}"
 
-    # Startup parameters
-    args=("--configDir" "${FLINK_CONF_DIR}" "--executionMode" "cluster")
+    args=("--configDir" "${FLINK_CONF_DIR}" "${args[@]}")
     if [ ! -z $HOST ]; then
-        args+=("--host")
-        args+=("${HOST}")
+        args+=("-D")
+        args+=("jobmanager.rpc.address=${HOST}")
     fi
 
     if [ ! -z $WEBUIPORT ]; then
-        args+=("--webui-port")
-        args+=("${WEBUIPORT}")
+        args+=("-D")
+        args+=("rest.port=${WEBUIPORT}")
+    fi
+
+    if [ ! -z "${DYNAMIC_PARAMETERS}" ]; then
+        args=(${DYNAMIC_PARAMETERS[@]} "${args[@]}")
     fi
 fi
 
 if [[ $STARTSTOP == "start-foreground" ]]; then
-    exec "${FLINK_BIN_DIR}"/flink-console.sh $JOBMANAGER_TYPE "${args[@]}"
+    exec "${FLINK_BIN_DIR}"/flink-console.sh $ENTRYPOINT "${args[@]}"
 else
-    "${FLINK_BIN_DIR}"/flink-daemon.sh $STARTSTOP $JOBMANAGER_TYPE "${args[@]}"
+    "${FLINK_BIN_DIR}"/flink-daemon.sh $STARTSTOP $ENTRYPOINT "${args[@]}"
 fi

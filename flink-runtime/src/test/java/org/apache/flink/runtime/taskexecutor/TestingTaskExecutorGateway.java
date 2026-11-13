@@ -18,157 +18,402 @@
 
 package org.apache.flink.runtime.taskexecutor;
 
+import org.apache.flink.api.common.ApplicationID;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.time.Time;
-import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.tuple.Tuple7;
+import org.apache.flink.configuration.ThreadDumpMode;
 import org.apache.flink.runtime.blob.TransientBlobKey;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.clusterframework.types.SlotID;
-import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptor;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.PartitionInfo;
+import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
+import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
+import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.jobmaster.AllocatedSlotReport;
 import org.apache.flink.runtime.jobmaster.JobMasterId;
 import org.apache.flink.runtime.messages.Acknowledge;
-import org.apache.flink.runtime.messages.StackTraceSampleResponse;
+import org.apache.flink.runtime.messages.TaskThreadInfoResponse;
+import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.resourcemanager.ResourceManagerId;
-import org.apache.flink.testutils.category.Flip6;
+import org.apache.flink.runtime.rest.messages.LogInfo;
+import org.apache.flink.runtime.rest.messages.ProfilingInfo;
+import org.apache.flink.runtime.rest.messages.ThreadDumpInfo;
+import org.apache.flink.runtime.shuffle.PartitionWithMetrics;
+import org.apache.flink.runtime.webmonitor.threadinfo.ThreadInfoSamplesRequest;
+import org.apache.flink.types.SerializableOptional;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.SerializedValue;
+import org.apache.flink.util.concurrent.FutureUtils;
+import org.apache.flink.util.function.QuadFunction;
+import org.apache.flink.util.function.TriFunction;
 
-import org.junit.experimental.categories.Category;
-
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
-/**
- * Simple {@link TaskExecutorGateway} implementation for testing purposes.
- */
-@Category(Flip6.class)
+/** Simple {@link TaskExecutorGateway} implementation for testing purposes. */
 public class TestingTaskExecutorGateway implements TaskExecutorGateway {
 
-	private final String address;
+    private final String address;
 
-	private final String hostname;
+    private final String hostname;
 
-	private volatile Consumer<ResourceID> heartbeatJobManagerConsumer;
+    private final BiFunction<ResourceID, AllocatedSlotReport, CompletableFuture<Void>>
+            heartbeatJobManagerFunction;
 
-	private volatile Consumer<Tuple2<JobID, Throwable>> disconnectJobManagerConsumer;
+    private final BiConsumer<JobID, Throwable> disconnectJobManagerConsumer;
 
-	public TestingTaskExecutorGateway() {
-		this("foobar:1234", "foobar");
-	}
+    private final BiFunction<TaskDeploymentDescriptor, JobMasterId, CompletableFuture<Acknowledge>>
+            submitTaskConsumer;
 
-	public TestingTaskExecutorGateway(String address, String hostname) {
-		this.address = Preconditions.checkNotNull(address);
-		this.hostname = Preconditions.checkNotNull(hostname);
-	}
+    private final Function<
+                    Tuple7<
+                            SlotID,
+                            JobID,
+                            ApplicationID,
+                            AllocationID,
+                            ResourceProfile,
+                            String,
+                            ResourceManagerId>,
+                    CompletableFuture<Acknowledge>>
+            requestSlotFunction;
 
-	public void setHeartbeatJobManagerConsumer(Consumer<ResourceID> heartbeatJobManagerConsumer) {
-		this.heartbeatJobManagerConsumer = heartbeatJobManagerConsumer;
-	}
+    private final Function<JobID, CompletableFuture<Collection<PartitionWithMetrics>>>
+            requestPartitionWithMetricsFunction;
 
-	public void setDisconnectJobManagerConsumer(Consumer<Tuple2<JobID, Throwable>> disconnectJobManagerConsumer) {
-		this.disconnectJobManagerConsumer = disconnectJobManagerConsumer;
-	}
+    private final BiFunction<AllocationID, Throwable, CompletableFuture<Acknowledge>>
+            freeSlotFunction;
 
-	@Override
-	public CompletableFuture<Acknowledge> requestSlot(SlotID slotId, JobID jobId, AllocationID allocationId, String targetAddress, ResourceManagerId resourceManagerId, Time timeout) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    private final Consumer<JobID> freeInactiveSlotsConsumer;
 
-	@Override
-	public CompletableFuture<StackTraceSampleResponse> requestStackTraceSample(
-			final ExecutionAttemptID executionAttemptId,
-			final int sampleId,
-			final int numSamples,
-			final Time delayBetweenSamples,
-			final int maxStackTraceDepth,
-			final Time timeout) {
-		throw new UnsupportedOperationException();
-	}
+    private final Function<ResourceID, CompletableFuture<Void>> heartbeatResourceManagerFunction;
 
-	@Override
-	public CompletableFuture<Acknowledge> submitTask(TaskDeploymentDescriptor tdd, JobMasterId jobMasterId, Time timeout) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    private final Consumer<Exception> disconnectResourceManagerConsumer;
 
-	@Override
-	public CompletableFuture<Acknowledge> updatePartitions(ExecutionAttemptID executionAttemptID, Iterable<PartitionInfo> partitionInfos, Time timeout) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    private final Function<ExecutionAttemptID, CompletableFuture<Acknowledge>> cancelTaskFunction;
 
-	@Override
-	public void failPartition(ExecutionAttemptID executionAttemptID) {
-		// noop
-	}
+    private final Supplier<CompletableFuture<Boolean>> canBeReleasedSupplier;
 
-	@Override
-	public CompletableFuture<Acknowledge> triggerCheckpoint(ExecutionAttemptID executionAttemptID, long checkpointID, long checkpointTimestamp, CheckpointOptions checkpointOptions) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    private BiConsumer<JobID, Set<ResultPartitionID>> releasePartitionsConsumer;
+    private BiConsumer<JobID, Set<ResultPartitionID>> promotePartitionsConsumer;
+    private final Consumer<Collection<IntermediateDataSetID>> releaseClusterPartitionsConsumer;
 
-	@Override
-	public CompletableFuture<Acknowledge> confirmCheckpoint(ExecutionAttemptID executionAttemptID, long checkpointId, long checkpointTimestamp) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    private final TriFunction<
+                    ExecutionAttemptID,
+                    OperatorID,
+                    SerializedValue<OperatorEvent>,
+                    CompletableFuture<Acknowledge>>
+            operatorEventHandler;
 
-	@Override
-	public CompletableFuture<Acknowledge> stopTask(ExecutionAttemptID executionAttemptID, Time timeout) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    private final Supplier<CompletableFuture<ThreadDumpInfo>> requestThreadDumpSupplier;
 
-	@Override
-	public CompletableFuture<Acknowledge> cancelTask(ExecutionAttemptID executionAttemptID, Time timeout) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    private final Supplier<CompletableFuture<ProfilingInfo>> requestProfilingSupplier;
 
-	@Override
-	public void heartbeatFromJobManager(ResourceID heartbeatOrigin) {
-		final Consumer<ResourceID> currentHeartbeatJobManagerConsumer = heartbeatJobManagerConsumer;
+    private final Supplier<CompletableFuture<TaskThreadInfoResponse>>
+            requestThreadInfoSamplesSupplier;
 
-		if (currentHeartbeatJobManagerConsumer != null) {
-			currentHeartbeatJobManagerConsumer.accept(heartbeatOrigin);
-		}
-	}
+    private final QuadFunction<
+                    ExecutionAttemptID,
+                    Long,
+                    Long,
+                    CheckpointOptions,
+                    CompletableFuture<Acknowledge>>
+            triggerCheckpointFunction;
 
-	@Override
-	public void heartbeatFromResourceManager(ResourceID heartbeatOrigin) {
-		// noop
-	}
+    private final TriFunction<ExecutionAttemptID, Long, Long, CompletableFuture<Acknowledge>>
+            confirmCheckpointFunction;
 
-	@Override
-	public void disconnectJobManager(JobID jobId, Exception cause) {
-		final Consumer<Tuple2<JobID, Throwable>> currentDisconnectJobManagerConsumer = disconnectJobManagerConsumer;
+    TestingTaskExecutorGateway(
+            String address,
+            String hostname,
+            BiFunction<ResourceID, AllocatedSlotReport, CompletableFuture<Void>>
+                    heartbeatJobManagerFunction,
+            BiConsumer<JobID, Throwable> disconnectJobManagerConsumer,
+            BiFunction<TaskDeploymentDescriptor, JobMasterId, CompletableFuture<Acknowledge>>
+                    submitTaskConsumer,
+            Function<
+                            Tuple7<
+                                    SlotID,
+                                    JobID,
+                                    ApplicationID,
+                                    AllocationID,
+                                    ResourceProfile,
+                                    String,
+                                    ResourceManagerId>,
+                            CompletableFuture<Acknowledge>>
+                    requestSlotFunction,
+            Function<JobID, CompletableFuture<Collection<PartitionWithMetrics>>>
+                    requestPartitionWithMetricsFunction,
+            BiFunction<AllocationID, Throwable, CompletableFuture<Acknowledge>> freeSlotFunction,
+            Consumer<JobID> freeInactiveSlotsConsumer,
+            Function<ResourceID, CompletableFuture<Void>> heartbeatResourceManagerFunction,
+            Consumer<Exception> disconnectResourceManagerConsumer,
+            Function<ExecutionAttemptID, CompletableFuture<Acknowledge>> cancelTaskFunction,
+            Supplier<CompletableFuture<Boolean>> canBeReleasedSupplier,
+            BiConsumer<JobID, Set<ResultPartitionID>> releasePartitionsConsumer,
+            BiConsumer<JobID, Set<ResultPartitionID>> promotePartitionsConsumer,
+            Consumer<Collection<IntermediateDataSetID>> releaseClusterPartitionsConsumer,
+            TriFunction<
+                            ExecutionAttemptID,
+                            OperatorID,
+                            SerializedValue<OperatorEvent>,
+                            CompletableFuture<Acknowledge>>
+                    operatorEventHandler,
+            Supplier<CompletableFuture<ThreadDumpInfo>> requestThreadDumpSupplier,
+            Supplier<CompletableFuture<ProfilingInfo>> requestProfilingSupplier,
+            Supplier<CompletableFuture<TaskThreadInfoResponse>> requestThreadInfoSamplesSupplier,
+            QuadFunction<
+                            ExecutionAttemptID,
+                            Long,
+                            Long,
+                            CheckpointOptions,
+                            CompletableFuture<Acknowledge>>
+                    triggerCheckpointFunction,
+            TriFunction<ExecutionAttemptID, Long, Long, CompletableFuture<Acknowledge>>
+                    confirmCheckpointFunction) {
 
-		if (currentDisconnectJobManagerConsumer != null) {
-			currentDisconnectJobManagerConsumer.accept(Tuple2.of(jobId, cause));
-		}
-	}
+        this.address = Preconditions.checkNotNull(address);
+        this.hostname = Preconditions.checkNotNull(hostname);
+        this.heartbeatJobManagerFunction = Preconditions.checkNotNull(heartbeatJobManagerFunction);
+        this.disconnectJobManagerConsumer =
+                Preconditions.checkNotNull(disconnectJobManagerConsumer);
+        this.submitTaskConsumer = Preconditions.checkNotNull(submitTaskConsumer);
+        this.requestSlotFunction = Preconditions.checkNotNull(requestSlotFunction);
+        this.requestPartitionWithMetricsFunction =
+                Preconditions.checkNotNull(requestPartitionWithMetricsFunction);
+        this.freeSlotFunction = Preconditions.checkNotNull(freeSlotFunction);
+        this.freeInactiveSlotsConsumer = Preconditions.checkNotNull(freeInactiveSlotsConsumer);
+        this.heartbeatResourceManagerFunction = heartbeatResourceManagerFunction;
+        this.disconnectResourceManagerConsumer = disconnectResourceManagerConsumer;
+        this.cancelTaskFunction = cancelTaskFunction;
+        this.canBeReleasedSupplier = canBeReleasedSupplier;
+        this.releasePartitionsConsumer = releasePartitionsConsumer;
+        this.promotePartitionsConsumer = promotePartitionsConsumer;
+        this.releaseClusterPartitionsConsumer = releaseClusterPartitionsConsumer;
+        this.operatorEventHandler = operatorEventHandler;
+        this.requestThreadDumpSupplier = requestThreadDumpSupplier;
+        this.requestProfilingSupplier = requestProfilingSupplier;
+        this.requestThreadInfoSamplesSupplier = requestThreadInfoSamplesSupplier;
+        this.triggerCheckpointFunction = triggerCheckpointFunction;
+        this.confirmCheckpointFunction = confirmCheckpointFunction;
+    }
 
-	@Override
-	public void disconnectResourceManager(Exception cause) {
-		// noop
-	}
+    @Override
+    public CompletableFuture<Acknowledge> requestSlot(
+            SlotID slotId,
+            JobID jobId,
+            ApplicationID applicationId,
+            AllocationID allocationId,
+            ResourceProfile resourceProfile,
+            String targetAddress,
+            ResourceManagerId resourceManagerId,
+            Duration timeout) {
+        return requestSlotFunction.apply(
+                Tuple7.of(
+                        slotId,
+                        jobId,
+                        applicationId,
+                        allocationId,
+                        resourceProfile,
+                        targetAddress,
+                        resourceManagerId));
+    }
 
-	@Override
-	public CompletableFuture<Acknowledge> freeSlot(AllocationID allocationId, Throwable cause, Time timeout) {
-		return CompletableFuture.completedFuture(Acknowledge.get());
-	}
+    @Override
+    public CompletableFuture<Collection<PartitionWithMetrics>> getAndRetainPartitionWithMetrics(
+            JobID jobId) {
+        return requestPartitionWithMetricsFunction.apply(jobId);
+    }
 
-	@Override
-	public CompletableFuture<TransientBlobKey> requestFileUpload(FileType fileType, Time timeout) {
-		return FutureUtils.completedExceptionally(new UnsupportedOperationException());
-	}
+    @Override
+    public CompletableFuture<Acknowledge> submitTask(
+            TaskDeploymentDescriptor tdd, JobMasterId jobMasterId, Duration timeout) {
+        return submitTaskConsumer.apply(tdd, jobMasterId);
+    }
 
-	@Override
-	public String getAddress() {
-		return address;
-	}
+    @Override
+    public CompletableFuture<Acknowledge> updatePartitions(
+            ExecutionAttemptID executionAttemptID,
+            Iterable<PartitionInfo> partitionInfos,
+            Duration timeout) {
+        return CompletableFuture.completedFuture(Acknowledge.get());
+    }
 
-	@Override
-	public String getHostname() {
-		return hostname;
-	}
+    @Override
+    public void releasePartitions(JobID jobId, Set<ResultPartitionID> partitionIds) {
+        releasePartitionsConsumer.accept(jobId, partitionIds);
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> promotePartitions(
+            JobID jobId, Set<ResultPartitionID> partitionIds) {
+        promotePartitionsConsumer.accept(jobId, partitionIds);
+        return CompletableFuture.completedFuture(Acknowledge.get());
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> releaseClusterPartitions(
+            Collection<IntermediateDataSetID> dataSetsToRelease, Duration timeout) {
+        releaseClusterPartitionsConsumer.accept(dataSetsToRelease);
+        return CompletableFuture.completedFuture(Acknowledge.get());
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> triggerCheckpoint(
+            ExecutionAttemptID executionAttemptID,
+            long checkpointID,
+            long checkpointTimestamp,
+            CheckpointOptions checkpointOptions) {
+        return triggerCheckpointFunction.apply(
+                executionAttemptID, checkpointID, checkpointTimestamp, checkpointOptions);
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> confirmCheckpoint(
+            ExecutionAttemptID executionAttemptID,
+            long checkpointId,
+            long checkpointTimestamp,
+            long lastSubsumedCheckpointId) {
+        return confirmCheckpointFunction.apply(
+                executionAttemptID, checkpointId, checkpointTimestamp);
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> abortCheckpoint(
+            ExecutionAttemptID executionAttemptID,
+            long checkpointId,
+            long latestCompletedCheckpointId,
+            long checkpointTimestamp) {
+        return CompletableFuture.completedFuture(Acknowledge.get());
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> cancelTask(
+            ExecutionAttemptID executionAttemptID, Duration timeout) {
+        return cancelTaskFunction.apply(executionAttemptID);
+    }
+
+    @Override
+    public CompletableFuture<Void> heartbeatFromJobManager(
+            ResourceID heartbeatOrigin, AllocatedSlotReport allocatedSlotReport) {
+        return heartbeatJobManagerFunction.apply(heartbeatOrigin, allocatedSlotReport);
+    }
+
+    @Override
+    public CompletableFuture<Void> heartbeatFromResourceManager(ResourceID heartbeatOrigin) {
+        return heartbeatResourceManagerFunction.apply(heartbeatOrigin);
+    }
+
+    @Override
+    public void disconnectJobManager(JobID jobId, Exception cause) {
+        disconnectJobManagerConsumer.accept(jobId, cause);
+    }
+
+    @Override
+    public void disconnectResourceManager(Exception cause) {
+        disconnectResourceManagerConsumer.accept(cause);
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> freeSlot(
+            AllocationID allocationId, Throwable cause, Duration timeout) {
+        return freeSlotFunction.apply(allocationId, cause);
+    }
+
+    @Override
+    public void freeInactiveSlots(JobID jobId, Duration timeout) {
+        freeInactiveSlotsConsumer.accept(jobId);
+    }
+
+    @Override
+    public CompletableFuture<TransientBlobKey> requestFileUploadByType(
+            FileType fileType, Duration timeout) {
+        return FutureUtils.completedExceptionally(new UnsupportedOperationException());
+    }
+
+    @Override
+    public CompletableFuture<TransientBlobKey> requestFileUploadByName(
+            String fileName, Duration timeout) {
+        return FutureUtils.completedExceptionally(new UnsupportedOperationException());
+    }
+
+    @Override
+    public CompletableFuture<TransientBlobKey> requestFileUploadByNameAndType(
+            String fileName, FileType fileType, Duration timeout) {
+        return FutureUtils.completedExceptionally(new UnsupportedOperationException());
+    }
+
+    @Override
+    public CompletableFuture<SerializableOptional<String>> requestMetricQueryServiceAddress(
+            Duration timeout) {
+        return CompletableFuture.completedFuture(SerializableOptional.empty());
+    }
+
+    @Override
+    public CompletableFuture<Boolean> canBeReleased() {
+        return canBeReleasedSupplier.get();
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> sendOperatorEventToTask(
+            ExecutionAttemptID task, OperatorID operator, SerializedValue<OperatorEvent> evt) {
+        return operatorEventHandler.apply(task, operator, evt);
+    }
+
+    @Override
+    public CompletableFuture<ThreadDumpInfo> requestThreadDump(
+            ThreadDumpMode mode, Duration timeout) {
+        return requestThreadDumpSupplier.get();
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> updateDelegationTokens(
+            ResourceManagerId resourceManagerId, byte[] tokens) {
+        return CompletableFuture.completedFuture(Acknowledge.get());
+    }
+
+    @Override
+    public CompletableFuture<ProfilingInfo> requestProfiling(
+            int duration, ProfilingInfo.ProfilingMode mode, Duration timeout) {
+        return requestProfilingSupplier.get();
+    }
+
+    @Override
+    public CompletableFuture<Collection<ProfilingInfo>> requestProfilingList(Duration timeout) {
+        return FutureUtils.completedExceptionally(new UnsupportedOperationException());
+    }
+
+    @Override
+    public String getAddress() {
+        return address;
+    }
+
+    @Override
+    public CompletableFuture<TaskThreadInfoResponse> requestThreadInfoSamples(
+            Collection<ExecutionAttemptID> taskExecutionAttemptIds,
+            ThreadInfoSamplesRequest requestParams,
+            Duration timeout) {
+        return requestThreadInfoSamplesSupplier.get();
+    }
+
+    @Override
+    public String getHostname() {
+        return hostname;
+    }
+
+    @Override
+    public CompletableFuture<Collection<LogInfo>> requestLogList(Duration timeout) {
+        return FutureUtils.completedExceptionally(new UnsupportedOperationException());
+    }
 }

@@ -19,198 +19,210 @@
 package org.apache.flink.client.program;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.JobSubmissionResult;
-import org.apache.flink.api.common.time.Time;
+import org.apache.flink.api.common.accumulators.AccumulatorHelper;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.runtime.client.JobExecutionException;
+import org.apache.flink.core.execution.CheckpointType;
+import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.client.JobStatusMessage;
-import org.apache.flink.runtime.clusterframework.messages.GetClusterStatusResponse;
-import org.apache.flink.runtime.concurrent.FutureUtils;
-import org.apache.flink.runtime.concurrent.ScheduledExecutor;
-import org.apache.flink.runtime.concurrent.ScheduledExecutorServiceAdapter;
 import org.apache.flink.runtime.executiongraph.AccessExecutionGraph;
-import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.JobStatus;
-import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalException;
+import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
+import org.apache.flink.runtime.jobmaster.JobResult;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.minicluster.MiniCluster;
-import org.apache.flink.runtime.rpc.akka.exceptions.AkkaRpcException;
-import org.apache.flink.runtime.rpc.exceptions.FencingTokenException;
-import org.apache.flink.runtime.util.ExecutorThreadFactory;
-import org.apache.flink.runtime.util.LeaderConnectionInfo;
-import org.apache.flink.runtime.util.LeaderRetrievalUtils;
+import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
+import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
+import org.apache.flink.streaming.api.graph.ExecutionPlan;
+import org.apache.flink.util.AbstractID;
 import org.apache.flink.util.ExceptionUtils;
-import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.SerializedValue;
+import org.apache.flink.util.concurrent.FutureUtils;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
-import java.net.URL;
+import java.io.IOException;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Supplier;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 
-/**
- * Client to interact with a {@link MiniCluster}.
- */
-public class MiniClusterClient extends ClusterClient<MiniClusterClient.MiniClusterId> {
+/** Client to interact with a {@link MiniCluster}. */
+public class MiniClusterClient implements ClusterClient<MiniClusterClient.MiniClusterId> {
 
-	private final MiniCluster miniCluster;
-	private final ScheduledExecutorService scheduledExecutorService = Executors.newScheduledThreadPool(4, new ExecutorThreadFactory("Flink-MiniClusterClient"));
-	private final ScheduledExecutor scheduledExecutor = new ScheduledExecutorServiceAdapter(scheduledExecutorService);
+    private static final Logger LOG = LoggerFactory.getLogger(MiniClusterClient.class);
 
-	public MiniClusterClient(@Nonnull Configuration configuration, @Nonnull MiniCluster miniCluster) throws Exception {
-		super(configuration, miniCluster.getHighAvailabilityServices(), true);
+    private final MiniCluster miniCluster;
+    private final Configuration configuration;
 
-		this.miniCluster = miniCluster;
-	}
+    public MiniClusterClient(
+            @Nonnull Configuration configuration, @Nonnull MiniCluster miniCluster) {
+        this.configuration = configuration;
+        this.miniCluster = miniCluster;
+    }
 
-	@Override
-	public void shutdown() throws Exception {
-		super.shutdown();
-		scheduledExecutorService.shutdown();
-	}
+    @Override
+    public Configuration getFlinkConfiguration() {
+        return new Configuration(configuration);
+    }
 
-	@Override
-	public JobSubmissionResult submitJob(JobGraph jobGraph, ClassLoader classLoader) throws ProgramInvocationException {
-		if (isDetached()) {
-			try {
-				miniCluster.runDetached(jobGraph);
-			} catch (JobExecutionException | InterruptedException e) {
-				throw new ProgramInvocationException(
-					String.format("Could not run job %s in detached mode.", jobGraph.getJobID()),
-					e);
-			}
+    @Override
+    public CompletableFuture<JobID> submitJob(ExecutionPlan executionPlan) {
+        return miniCluster.submitJob(executionPlan).thenApply(JobSubmissionResult::getJobID);
+    }
 
-			return new JobSubmissionResult(jobGraph.getJobID());
-		} else {
-			try {
-				return miniCluster.executeJobBlocking(jobGraph);
-			} catch (JobExecutionException | InterruptedException e) {
-				throw new ProgramInvocationException(
-					String.format("Could not run job %s.", jobGraph.getJobID()),
-					e);
-			}
-		}
-	}
+    @Override
+    public CompletableFuture<JobResult> requestJobResult(@Nonnull JobID jobId) {
+        return miniCluster.requestJobResult(jobId);
+    }
 
-	@Override
-	public void cancel(JobID jobId) throws Exception {
-		guardWithSingleRetry(() -> miniCluster.cancelJob(jobId), scheduledExecutor);
-	}
+    @Override
+    public CompletableFuture<Acknowledge> cancel(JobID jobId) {
+        return miniCluster.cancelJob(jobId);
+    }
 
-	@Override
-	public String cancelWithSavepoint(JobID jobId, @Nullable String savepointDirectory) throws Exception {
-		return guardWithSingleRetry(() -> miniCluster.triggerSavepoint(jobId, savepointDirectory, true), scheduledExecutor).get();
-	}
+    @Override
+    public CompletableFuture<String> cancelWithSavepoint(
+            JobID jobId, @Nullable String savepointDirectory, SavepointFormatType formatType) {
+        return miniCluster.triggerSavepoint(jobId, savepointDirectory, true, formatType);
+    }
 
-	@Override
-	public void stop(JobID jobId) throws Exception {
-		guardWithSingleRetry(() -> miniCluster.stopJob(jobId), scheduledExecutor).get();
-	}
+    @Override
+    public CompletableFuture<String> stopWithSavepoint(
+            JobID jobId,
+            boolean advanceToEndOfEventTime,
+            @Nullable String savepointDirectory,
+            SavepointFormatType formatType) {
+        return miniCluster.stopWithSavepoint(
+                jobId, savepointDirectory, advanceToEndOfEventTime, formatType);
+    }
 
-	@Override
-	public CompletableFuture<String> triggerSavepoint(JobID jobId, @Nullable String savepointDirectory) throws FlinkException {
-		return guardWithSingleRetry(() -> miniCluster.triggerSavepoint(jobId, savepointDirectory, false), scheduledExecutor);
-	}
+    @Override
+    public CompletableFuture<String> stopWithDetachedSavepoint(
+            JobID jobId,
+            boolean advanceToEndOfEventTime,
+            @Nullable String savepointDirectory,
+            SavepointFormatType formatType) {
+        return miniCluster.stopWithDetachedSavepoint(
+                jobId, savepointDirectory, advanceToEndOfEventTime, formatType);
+    }
 
-	@Override
-	public CompletableFuture<Acknowledge> disposeSavepoint(String savepointPath, Time timeout) throws FlinkException {
-		throw new UnsupportedOperationException("MiniClusterClient does not yet support this operation.");
-	}
+    @Override
+    public CompletableFuture<String> triggerSavepoint(
+            JobID jobId, @Nullable String savepointDirectory, SavepointFormatType formatType) {
+        return miniCluster.triggerSavepoint(jobId, savepointDirectory, false, formatType);
+    }
 
-	@Override
-	public CompletableFuture<Collection<JobStatusMessage>> listJobs() throws Exception {
-		return guardWithSingleRetry(miniCluster::listJobs, scheduledExecutor);
-	}
+    @Override
+    public CompletableFuture<Long> triggerCheckpoint(JobID jobId, CheckpointType checkpointType) {
+        return miniCluster.triggerCheckpoint(jobId, checkpointType);
+    }
 
-	@Override
-	public Map<String, Object> getAccumulators(JobID jobID) throws Exception {
-		return getAccumulators(jobID, ClassLoader.getSystemClassLoader());
-	}
+    @Override
+    public CompletableFuture<String> triggerDetachedSavepoint(
+            JobID jobId, @Nullable String savepointDirectory, SavepointFormatType formatType) {
+        return miniCluster.triggerDetachedSavepoint(jobId, savepointDirectory, false, formatType);
+    }
 
-	@Override
-	public Map<String, Object> getAccumulators(JobID jobID, ClassLoader loader) throws Exception {
-		AccessExecutionGraph executionGraph = guardWithSingleRetry(() -> miniCluster.getExecutionGraph(jobID), scheduledExecutor).get();
-		Map<String, SerializedValue<Object>> accumulatorsSerialized = executionGraph.getAccumulatorsSerialized();
-		Map<String, Object> result = new HashMap<>(accumulatorsSerialized.size());
-		for (Map.Entry<String, SerializedValue<Object>> acc : accumulatorsSerialized.entrySet()) {
-			result.put(acc.getKey(), acc.getValue().deserializeValue(loader));
-		}
-		return result;
-	}
+    @Override
+    public CompletableFuture<Acknowledge> disposeSavepoint(String savepointPath) {
+        return miniCluster.disposeSavepoint(savepointPath);
+    }
 
-	@Override
-	public CompletableFuture<JobStatus> getJobStatus(JobID jobId) {
-		return guardWithSingleRetry(() -> miniCluster.getJobStatus(jobId), scheduledExecutor);
-	}
+    @Override
+    public CompletableFuture<Collection<JobStatusMessage>> listJobs() {
+        return miniCluster.listJobs();
+    }
 
-	@Override
-	public MiniClusterClient.MiniClusterId getClusterId() {
-		return MiniClusterId.INSTANCE;
-	}
+    @Override
+    public CompletableFuture<Map<String, Object>> getAccumulators(JobID jobID, ClassLoader loader) {
+        return miniCluster
+                .getExecutionGraph(jobID)
+                .thenApply(AccessExecutionGraph::getAccumulatorsSerialized)
+                .thenApply(
+                        accumulators -> {
+                            try {
+                                return AccumulatorHelper.deserializeAndUnwrapAccumulators(
+                                        accumulators, loader);
+                            } catch (Exception e) {
+                                throw new CompletionException(
+                                        "Cannot deserialize and unwrap accumulators properly.", e);
+                            }
+                        });
+    }
 
-	@Override
-	public LeaderConnectionInfo getClusterConnectionInfo() throws LeaderRetrievalException {
-		return LeaderRetrievalUtils.retrieveLeaderConnectionInfo(
-			highAvailabilityServices.getDispatcherLeaderRetriever(),
-			timeout);
-	}
+    @Override
+    public CompletableFuture<JobStatus> getJobStatus(JobID jobId) {
+        return miniCluster.getJobStatus(jobId);
+    }
 
-	// ======================================
-	// Legacy methods
-	// ======================================
+    @Override
+    public void close() {}
 
-	@Override
-	public void waitForClusterToBeReady() {
-		// no op
-	}
+    @Override
+    public MiniClusterClient.MiniClusterId getClusterId() {
+        return MiniClusterId.INSTANCE;
+    }
 
-	@Override
-	public String getWebInterfaceURL() {
-		return miniCluster.getRestAddress().toString();
-	}
+    @Override
+    public void shutDownCluster() {
+        try {
+            miniCluster.closeAsync().get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException e) {
+            LOG.error("Error while shutting down cluster", e);
+        }
+    }
 
-	@Override
-	public GetClusterStatusResponse getClusterStatus() {
-		return null;
-	}
+    @Override
+    public String getWebInterfaceURL() {
+        try {
+            return miniCluster.getRestAddress().get().toString();
+        } catch (InterruptedException | ExecutionException e) {
+            ExceptionUtils.checkInterrupted(e);
 
-	@Override
-	public List<String> getNewMessages() {
-		return Collections.emptyList();
-	}
+            LOG.warn("Could not retrieve the web interface URL for the cluster.", e);
+            return "Unknown address.";
+        }
+    }
 
-	@Override
-	public int getMaxSlots() {
-		return MAX_SLOTS_UNKNOWN;
-	}
+    @Override
+    public CompletableFuture<CoordinationResponse> sendCoordinationRequest(
+            JobID jobId, String operatorUid, CoordinationRequest request) {
+        try {
+            SerializedValue<CoordinationRequest> serializedRequest = new SerializedValue<>(request);
+            return miniCluster.deliverCoordinationRequestToCoordinator(
+                    jobId, operatorUid, serializedRequest);
+        } catch (IOException e) {
+            LOG.error("Error while sending coordination request", e);
+            return FutureUtils.completedExceptionally(e);
+        }
+    }
 
-	@Override
-	public boolean hasUserJarsInClassPath(List<URL> userJarFiles) {
-		return false;
-	}
+    @Override
+    public CompletableFuture<Set<AbstractID>> listCompletedClusterDatasetIds() {
+        return miniCluster.listCompletedClusterDatasetIds();
+    }
 
-	enum MiniClusterId {
-		INSTANCE
-	}
+    @Override
+    public CompletableFuture<Void> invalidateClusterDataset(AbstractID clusterDatasetId) {
+        return miniCluster.invalidateClusterDataset(new IntermediateDataSetID(clusterDatasetId));
+    }
 
-	private static <X> CompletableFuture<X> guardWithSingleRetry(Supplier<CompletableFuture<X>> operation, ScheduledExecutor executor) {
-		return FutureUtils.retryWithDelay(
-			operation,
-			1,
-			Time.milliseconds(500),
-			throwable -> {
-				Throwable actualException = ExceptionUtils.stripCompletionException(throwable);
-				return actualException instanceof FencingTokenException || actualException instanceof AkkaRpcException;
-			},
-			executor);
-	}
+    @Override
+    public CompletableFuture<Void> reportHeartbeat(JobID jobId, long expiredTimestamp) {
+        return miniCluster.reportHeartbeat(jobId, expiredTimestamp);
+    }
+
+    /** The type of the Cluster ID for the local {@link MiniCluster}. */
+    public enum MiniClusterId {
+        INSTANCE
+    }
 }
